@@ -9,6 +9,7 @@ use crate::filters::{self, FILTERS};
 use crate::raster::Img;
 use crate::state::Shared;
 use crate::util::{self};
+use crate::vector::EraseMode;
 use egui::{Color32, Pos2, Rect, Sense, Stroke as EStroke, Ui, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -70,7 +71,7 @@ pub struct UiState {
     pub hsva: Option<(egui::ecolor::Hsva, [u8; 3])>,
     pub op_before: Option<(usize, Props)>,
     pub bset_open: [bool; 9],
-    pub palette: usize,
+    pub palette_export: Option<(usize, &'static str)>,
     pub font_cache: HashMap<String, Vec<u8>>,
 }
 
@@ -79,7 +80,7 @@ impl Default for UiState {
         UiState {
             new_canvas: None, rename: None, layer_rename: None, resize: None, text: None, settings: false, help: false, confirm_delete: None,
             feather: None, dock_tab: [0, 0, 0], brush_cat: String::new(), win: Wins::default(), hex: String::new(), hsva: None, op_before: None,
-            bset_open: [true, false, false, false, false, false, false, false, false], palette: 0, font_cache: HashMap::new(),
+            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, font_cache: HashMap::new(),
         }
     }
 }
@@ -138,6 +139,7 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, name: &str, c: Color32) {
         "lock" => { line(&[(5.0, 10.5), (19.0, 10.5), (19.0, 20.5), (5.0, 20.5), (5.0, 10.5)]); line(&[(8.0, 10.5), (8.0, 8.0), (10.0, 4.5), (14.0, 4.5), (16.0, 8.0), (16.0, 10.5)]); }
         "alphalock" => { dashed(&[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0), (4.0, 4.0)]); line(&[(9.0, 12.5), (15.0, 12.5)]); line(&[(12.0, 9.5), (12.0, 15.5)]); }
         "clip" => { line(&[(7.0, 4.0), (7.0, 13.0), (10.0, 16.0), (19.0, 16.0)]); line(&[(16.0, 13.0), (19.0, 16.0), (16.0, 19.0)]); }
+        "vector" => { let pts: Vec<(f32, f32)> = (0..=16).map(|i| { let t = i as f32 / 16.0; let u = 1.0 - t; (u * u * 4.0 + 2.0 * u * t * 12.0 + t * t * 20.0, u * u * 19.0 + 2.0 * u * t * 1.0 + t * t * 19.0) }).collect(); line(&pts); for (x, y) in [(4.0, 19.0), (20.0, 19.0)] { p.rect_stroke(Rect::from_center_size(q(x, y), Vec2::splat(4.0 * k)), 0.0, s, egui::StrokeKind::Middle); } p.circle_filled(q(12.0, 10.0), 1.8 * k, c); }
         _ => { p.circle_filled(r.center(), 2.0 * k, c); }
     }
 }
@@ -274,15 +276,21 @@ fn menu_bar(ui: &mut Ui, cx: &mut Cx) {
     egui::menu::bar(ui, |ui| {
         ui.menu_button("Файл", |ui| {
             if ui.add(egui::Button::new("Создать…").shortcut_text("Ctrl+N")).clicked() { cx.acts.push("new"); ui.close_menu(); }
-            if ui.add_enabled(crate::platform::can_pick_files(), egui::Button::new("Открыть / импорт…").shortcut_text("Ctrl+O")).clicked() { cx.acts.push("open"); ui.close_menu(); }
+            if ui.add(egui::Button::new("Открыть / импорт…").shortcut_text("Ctrl+O")).clicked() { cx.acts.push("open"); ui.close_menu(); }
             if ui.button("Галерея").clicked() { cx.acts.push("gallery"); ui.close_menu(); }
             ui.separator();
             if ui.add(egui::Button::new("Сохранить").shortcut_text("Ctrl+S")).clicked() { cx.acts.push("save"); ui.close_menu(); }
+            if ui.add(egui::Button::new("Сохранить как…").shortcut_text("Ctrl+Shift+S")).on_hover_text("Сохранить проект .mazok в выбранную папку").clicked() { cx.acts.push("save_as"); ui.close_menu(); }
+            if ui.button("Быстрый экспорт PNG").on_hover_text("В папку для сохранения из настроек").clicked() { cx.acts.push("quick_png"); ui.close_menu(); }
             ui.menu_button("Экспорт", |ui| {
                 for (k, n) in [("export_png", "PNG"), ("export_jpeg", "JPEG"), ("export_psd", "PSD со слоями"), ("export_mazok", "Проект Мазок (.mazok)"), ("export_layers", "Слои в PNG (ZIP)"), ("export_gif", "GIF (слои — кадры)")] {
                     if ui.button(n).clicked() { cx.acts.push(k); ui.close_menu(); }
                 }
             });
+            if ui.button("Папка для сохранения…").clicked() { cx.acts.push("pick_export_dir"); ui.close_menu(); }
+            ui.separator();
+            if ui.button("Импорт кистей (.abr, .sut)…").clicked() { cx.acts.push("import_brushes"); ui.close_menu(); }
+            if ui.button("Импорт палитры…").clicked() { cx.acts.push("import_palette"); ui.close_menu(); }
             ui.separator();
             if ui.button("Закрыть").clicked() { cx.acts.push("gallery"); ui.close_menu(); }
         });
@@ -318,10 +326,10 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     if ui.add_enabled(ed.hist.can_undo(), egui::Button::new(format!("Отменить {un}")).shortcut_text("Ctrl+Z")).clicked() { ed.undo(); ui.close_menu(); }
     if ui.add_enabled(ed.hist.can_redo(), egui::Button::new("Повторить").shortcut_text("Ctrl+Shift+Z")).clicked() { ed.redo(); ui.close_menu(); }
     ui.separator();
-    if ui.add(egui::Button::new("Вырезать").shortcut_text("Ctrl+X")).clicked() { ed.cut(); ui.close_menu(); }
-    if ui.add(egui::Button::new("Копировать").shortcut_text("Ctrl+C")).clicked() { ed.copy(false); ui.close_menu(); }
-    if ui.add(egui::Button::new("Скопировать совмещённые").shortcut_text("Ctrl+Shift+C")).clicked() { ed.copy(true); ui.close_menu(); }
-    if ui.add(egui::Button::new("Вставить").shortcut_text("Ctrl+V")).clicked() { ed.paste(); ui.close_menu(); }
+    if ui.add(egui::Button::new("Вырезать").shortcut_text("Ctrl+X")).clicked() { cx.acts.push("cut"); ui.close_menu(); }
+    if ui.add(egui::Button::new("Копировать").shortcut_text("Ctrl+C")).clicked() { cx.acts.push("copy"); ui.close_menu(); }
+    if ui.add(egui::Button::new("Скопировать совмещённые").shortcut_text("Ctrl+Shift+C")).clicked() { cx.acts.push("copy_merged"); ui.close_menu(); }
+    if ui.add(egui::Button::new("Вставить").shortcut_text("Ctrl+V")).on_hover_text("Картинка из буфера обмена — новым слоем").clicked() { cx.acts.push("paste"); ui.close_menu(); }
     if ui.add(egui::Button::new("Очистить").shortcut_text("Delete")).clicked() { ed.layer_clear(); ui.close_menu(); }
     if ui.button("Залить основным цветом").clicked() { let c = cx.sh.colors.fg; ed.layer_fill(c); ui.close_menu(); }
     ui.separator();
@@ -360,6 +368,8 @@ fn layer_menu(ui: &mut Ui, cx: &mut Cx) {
     let ed = &mut *cx.ed;
     let li = ed.doc.active;
     if ui.add(egui::Button::new("Новый слой").shortcut_text("Ctrl+Shift+N")).clicked() { ed.layer_add(); ui.close_menu(); }
+    if ui.button("Новый векторный слой").on_hover_text("Линии остаются линиями: их можно стирать до пересечения и масштабировать без потерь").clicked() { ed.layer_add_vector(); ui.close_menu(); }
+    if ed.doc.layer().is_vector() && ui.button("Растеризовать слой").clicked() { ed.layer_rasterize(); ui.close_menu(); }
     if ui.add(egui::Button::new("Дублировать слой").shortcut_text("Ctrl+J")).clicked() { ed.layer_duplicate(); ui.close_menu(); }
     if ui.button("Удалить слой").clicked() { ed.layer_delete(); ui.close_menu(); }
     if ui.button("Переименовать…").clicked() { cx.st.layer_rename = Some((li, ed.doc.layer().name.clone())); ui.close_menu(); }
@@ -436,6 +446,12 @@ fn options_bar(ui: &mut Ui, cx: &mut Cx) {
         match ed.tool {
             Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Clone => {
                 let tool = ed.tool;
+                ui.spacing_mut().slider_width = 76.0;
+                if tool == Tool::Eraser && ed.doc.layer().is_vector() {
+                    ui.label(egui::RichText::new("Векторный ластик:").strong());
+                    vector_erase_modes(ui, &mut cx.sh.prefs.vector_erase);
+                    ui.separator();
+                }
                 let ts = ed.tool_state_mut(cx.sh).clone();
                 let b = cx.sh.brushes.get(&ts.brush_id).clone();
                 if ui.button(format!("{}  ...", b.name)).on_hover_text("Выбрать кисть").clicked() { cx.st.dock_tab[1] = 0; cx.st.win.brushes = !cx.st.win.brushes; }
@@ -459,6 +475,10 @@ fn options_bar(ui: &mut Ui, cx: &mut Cx) {
                 let c2 = ui.add(egui::Slider::new(&mut bb.flow, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed();
                 ui.label("Сглаживание");
                 let c3 = ui.add(egui::Slider::new(&mut bb.streamline, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed();
+                if tool != Tool::Smudge {
+                    ui.label("Стабилизатор");
+                    ui.add(egui::Slider::new(&mut cx.sh.prefs.stabilizer, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).on_hover_text("«Ленивая кисть»: линия тянется за пером на нити — ровные линии без дрожания");
+                }
                 let mut ps = bb.p_size > 0.0;
                 ui.label("Перо:");
                 let c4 = ui.toggle_value(&mut ps, "размер").on_hover_text("Нажим пера управляет размером").changed();
@@ -538,6 +558,12 @@ fn options_bar(ui: &mut Ui, cx: &mut Cx) {
     });
 }
 
+fn vector_erase_modes(ui: &mut Ui, mode: &mut String) {
+    for (m, tip) in [(EraseMode::Touch, "Стирает только там, где прошёл ластик"), (EraseMode::Whole, "Удаляет всю задетую линию"), (EraseMode::Intersect, "Стирает часть линии до ближайших пересечений с другими линиями")] {
+        if ui.selectable_label(*mode == m.id(), m.name()).on_hover_text(tip).clicked() { *mode = m.id().into(); }
+    }
+}
+
 /* ---------- панель инструментов ---------- */
 
 const TOOLS: [(Tool, Option<SelShape>, &str, &str); 19] = [
@@ -610,9 +636,17 @@ fn color_panel(ui: &mut Ui, cx: &mut Cx) {
         let recent = cx.sh.colors.recent.clone();
         swatch_row(ui, &recent, |c| cx.sh.colors.set(c));
     }
-    if let Some(p) = cx.sh.palettes.get(cx.st.palette.min(cx.sh.palettes.len().saturating_sub(1))).cloned() {
-        ui.label(egui::RichText::new(format!("Палитра: {}", p.name)).weak());
-        swatch_row(ui, &p.colors, |c| cx.sh.colors.set(c));
+    if !cx.sh.palettes.is_empty() {
+        let pi = cx.sh.palette.min(cx.sh.palettes.len() - 1);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Палитра").weak());
+            egui::ComboBox::from_id_salt("cpal").selected_text(cx.sh.palettes[pi].name.clone()).width(160.0).show_ui(ui, |ui| {
+                for i in 0..cx.sh.palettes.len() { let n = cx.sh.palettes[i].name.clone(); ui.selectable_value(&mut cx.sh.palette, i, n); }
+            });
+            if ui.small_button("+").on_hover_text("Добавить текущий цвет в палитру").clicked() { let c = cx.sh.colors.fg; let p = &mut cx.sh.palettes[pi]; p.colors.push(c); p.names.push(String::new()); }
+        });
+        let p = cx.sh.palettes[pi].clone();
+        palette_grid(ui, cx, pi, &p);
     }
 }
 
@@ -627,32 +661,87 @@ fn swatch_row(ui: &mut Ui, cols: &[[u8; 3]], mut pick: impl FnMut([u8; 3])) {
     });
 }
 
-fn swatches_panel(ui: &mut Ui, cx: &mut Cx) {
-    let n = cx.sh.palettes.len();
+/// Сетка образцов палитры: щелчок — выбрать цвет, правая кнопка — меню образца.
+fn palette_grid(ui: &mut Ui, cx: &mut Cx, pi: usize, p: &crate::state::Palette) {
     let mut remove = None;
-    for i in 0..n {
-        let p = cx.sh.palettes[i].clone();
-        ui.horizontal(|ui| {
-            ui.strong(&p.name);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Удалить палитру").clicked() { remove = Some(i); }
-                if ui.small_button("+").on_hover_text("Добавить текущий цвет").clicked() { let c = cx.sh.colors.fg; cx.sh.palettes[i].colors.push(c); }
-                if ui.selectable_label(cx.st.palette == i, "основная").clicked() { cx.st.palette = i; }
+    let mut replace = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(3.0);
+        for (i, c) in p.colors.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+            ui.painter().rect_filled(r, 3.0, Color32::from_rgb(c[0], c[1], c[2]));
+            if *c == cx.sh.colors.fg { ui.painter().rect_stroke(r, 3.0, EStroke::new(2.0, ACCENT), egui::StrokeKind::Outside); }
+            let name = p.names.get(i).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| util::hex(*c));
+            let resp = resp.on_hover_text(name);
+            if resp.clicked() { cx.sh.colors.set(*c); }
+            resp.context_menu(|ui| {
+                if ui.button("Заменить текущим цветом").clicked() { replace = Some(i); ui.close_menu(); }
+                if ui.button("Удалить образец").clicked() { remove = Some(i); ui.close_menu(); }
             });
-        });
-        swatch_row(ui, &p.colors, |c| cx.sh.colors.set(c));
-        ui.add_space(6.0);
-    }
-    if let Some(i) = remove { cx.sh.palettes.remove(i); if cx.sh.palettes.is_empty() { cx.sh.palettes = crate::state::default_palettes(); } }
+        }
+        if p.colors.is_empty() { ui.label(egui::RichText::new("Палитра пуста — нажмите «+», чтобы добавить текущий цвет").weak()); }
+    });
+    let pal = &mut cx.sh.palettes[pi];
+    if let Some(i) = replace { pal.colors[i] = cx.sh.colors.fg; }
+    if let Some(i) = remove { pal.colors.remove(i); if i < pal.names.len() { pal.names.remove(i); } }
+}
+
+fn swatches_panel(ui: &mut Ui, cx: &mut Cx) {
+    if cx.sh.palettes.is_empty() { cx.sh.palettes = crate::state::default_palettes(); }
+    let pi = cx.sh.palette.min(cx.sh.palettes.len() - 1);
+    cx.sh.palette = pi;
     ui.horizontal(|ui| {
-        if ui.button("+ Новая палитра").clicked() { let k = cx.sh.palettes.len() + 1; cx.sh.palettes.push(crate::state::Palette { name: format!("Палитра {k}"), colors: vec![] }); }
-        if ui.button("Из холста").clicked() {
+        egui::ComboBox::from_id_salt("spal").selected_text(cx.sh.palettes[pi].name.clone()).width(170.0).show_ui(ui, |ui| {
+            for i in 0..cx.sh.palettes.len() { let n = format!("{}  ({})", cx.sh.palettes[i].name, cx.sh.palettes[i].colors.len()); ui.selectable_value(&mut cx.sh.palette, i, n); }
+        });
+        if ui.small_button("+").on_hover_text("Добавить текущий цвет").clicked() { let c = cx.sh.colors.fg; let p = &mut cx.sh.palettes[pi]; p.colors.push(c); p.names.push(String::new()); }
+    });
+    let pi = cx.sh.palette.min(cx.sh.palettes.len() - 1);
+    ui.horizontal(|ui| {
+        ui.label("Название");
+        let mut n = cx.sh.palettes[pi].name.clone();
+        if ui.add(egui::TextEdit::singleline(&mut n).desired_width(170.0)).changed() { cx.sh.palettes[pi].name = n; }
+    });
+    let p = cx.sh.palettes[pi].clone();
+    palette_grid(ui, cx, pi, &p);
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Новая").clicked() {
+            let k = cx.sh.palettes.len() + 1;
+            cx.sh.palettes.push(crate::state::Palette { name: format!("Палитра {k}"), ..Default::default() });
+            cx.sh.palette = cx.sh.palettes.len() - 1;
+        }
+        if ui.button("Импорт…").on_hover_text("Photoshop .aco/.ase, GIMP/Krita .gpl, .pal, Procreate .swatches, список HEX").clicked() { cx.acts.push("import_palette"); }
+        ui.menu_button("Экспорт", |ui| {
+            for (k, n) in [("aco", "Photoshop (.aco)"), ("ase", "Adobe Swatch Exchange (.ase)"), ("gpl", "GIMP / Krita (.gpl)"), ("swatches", "Procreate (.swatches)"), ("hex", "Список HEX (.hex)")] {
+                if ui.button(n).clicked() { cx.st.palette_export = Some((pi, k)); ui.close_menu(); }
+            }
+        });
+        if ui.button("Из холста").on_hover_text("Собрать основные цвета рисунка").clicked() {
             let cols = palette_from(&crate::doc::flatten(&cx.ed.doc, true));
-            cx.sh.palettes.push(crate::state::Palette { name: format!("Из «{}»", cx.ed.doc.name), colors: cols });
+            let n = cols.len();
+            cx.sh.palettes.push(crate::state::Palette { name: format!("Из «{}»", cx.ed.doc.name), colors: cols, names: vec![String::new(); n] });
+            cx.sh.palette = cx.sh.palettes.len() - 1;
+        }
+        if ui.button("Недавние в палитру").clicked() {
+            let cols = cx.sh.colors.recent.clone();
+            let n = cols.len();
+            cx.sh.palettes.push(crate::state::Palette { name: "Недавние цвета".into(), colors: cols, names: vec![String::new(); n] });
+            cx.sh.palette = cx.sh.palettes.len() - 1;
+        }
+        if ui.button("Дублировать").clicked() {
+            let mut p = cx.sh.palettes[pi].clone();
+            p.name = format!("{} (копия)", p.name);
+            cx.sh.palettes.push(p);
+            cx.sh.palette = cx.sh.palettes.len() - 1;
+        }
+        if ui.button("Удалить").clicked() {
+            cx.sh.palettes.remove(pi);
+            if cx.sh.palettes.is_empty() { cx.sh.palettes = crate::state::default_palettes(); }
+            cx.sh.palette = pi.min(cx.sh.palettes.len() - 1);
         }
     });
 }
-
 fn palette_from(img: &Img) -> Vec<[u8; 3]> {
     let small = img.resize(72, 72);
     let px: Vec<[f32; 3]> = small.px.chunks_exact(4).filter(|p| p[3] > 128).map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
@@ -688,6 +777,7 @@ fn brushes_panel(ui: &mut Ui, cx: &mut Cx) {
     ui.horizontal(|ui| {
         if ui.small_button("+ Новая").clicked() { let id = cx.sh.brushes.create(); cx.st.brush_cat = "custom".into(); pick_brush(cx, &id); cx.st.dock_tab[1] = 1; }
         if ui.small_button("Дублировать").clicked() { let id = cx.sh.brushes.duplicate(&cur); cx.st.brush_cat = "custom".into(); pick_brush(cx, &id); }
+        if ui.small_button("Импорт…").on_hover_text("Кисти Photoshop (.abr) и Clip Studio Paint (.sut). Можно просто перетащить файл в окно").clicked() { cx.acts.push("import_brushes"); }
     });
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -697,7 +787,7 @@ fn brushes_panel(ui: &mut Ui, cx: &mut Cx) {
         ui.separator();
         ui.vertical(|ui| {
             let list: Vec<Brush> = cx.sh.brushes.list(&cx.st.brush_cat).into_iter().cloned().collect();
-            if list.is_empty() { ui.label(egui::RichText::new("Здесь появятся ваши кисти").weak()); }
+            if list.is_empty() { ui.label(egui::RichText::new(if cx.st.brush_cat == "imported" { "Импортируйте кисти Photoshop (.abr) или Clip Studio (.sut) кнопкой «Импорт…»" } else { "Здесь появятся ваши кисти" }).weak()); }
             let col = ui.visuals().text_color();
             let tcol = [col.r(), col.g(), col.b()];
             let ver = cx.sh.brushes.version;
@@ -748,9 +838,13 @@ fn brushset_panel(ui: &mut Ui, cx: &mut Cx) {
         egui::CollapsingHeader::new(egui::RichText::new(*title).strong()).id_salt(("bset", si)).default_open(cx.st.bset_open[si]).show(ui, |ui| {
             match si {
                 0 => {
-                    egui::ComboBox::from_id_salt("shape").selected_text(SHAPES.iter().find(|s| s.0 == b.shape).map_or("Круглая", |s| s.1)).show_ui(ui, |ui| {
+                    let custom = b.shape.starts_with("img:");
+                    let orig_shape = orig.shape.clone();
+                    egui::ComboBox::from_id_salt("shape").selected_text(if custom { "Своя форма" } else { SHAPES.iter().find(|s| s.0 == b.shape).map_or("Круглая", |s| s.1) }).show_ui(ui, |ui| {
+                        if orig_shape.starts_with("img:") { ui.selectable_value(&mut b.shape, orig_shape.clone(), "Своя форма"); }
                         for (sid, n) in SHAPES { ui.selectable_value(&mut b.shape, sid.to_string(), n); }
                     });
+                    if ui.button("Форма из картинки…").on_hover_text("Чёрное на белом или фигура на прозрачном фоне").clicked() { cx.acts.push("tip_image"); }
                     pslider(ui, "Жёсткость", &mut b.hardness, 0.0, 1.0, true);
                     pslider(ui, "Интервал", &mut b.spacing, 0.01, 2.5, true);
                     pslider(ui, "Округлость", &mut b.roundness, 0.02, 1.0, true);
@@ -770,10 +864,13 @@ fn brushset_panel(ui: &mut Ui, cx: &mut Cx) {
                 }
                 3 => {
                     let mut g = b.grain.clone().unwrap_or_default();
-                    egui::ComboBox::from_id_salt("grain").selected_text(GRAINS.iter().find(|x| x.0 == g).map_or("Без текстуры", |x| x.1)).show_ui(ui, |ui| {
+                    let og = orig.grain.clone().unwrap_or_default();
+                    egui::ComboBox::from_id_salt("grain").selected_text(if g.starts_with("img:") { "Своя текстура" } else { GRAINS.iter().find(|x| x.0 == g).map_or("Без текстуры", |x| x.1) }).show_ui(ui, |ui| {
                         ui.selectable_value(&mut g, String::new(), "Без текстуры");
+                        if og.starts_with("img:") { ui.selectable_value(&mut g, og.clone(), "Своя текстура"); }
                         for (gid, n) in GRAINS { ui.selectable_value(&mut g, gid.to_string(), n); }
                     });
+                    if ui.button("Текстура из картинки…").clicked() { cx.acts.push("grain_image"); }
                     b.grain = if g.is_empty() { None } else { Some(g) };
                     pslider(ui, "Масштаб", &mut b.grain_scale, 0.2, 4.0, false);
                     pslider(ui, "Глубина", &mut b.grain_strength, 0.0, 1.0, true);
@@ -794,6 +891,8 @@ fn brushset_panel(ui: &mut Ui, cx: &mut Cx) {
                     pslider(ui, "Сужение в начале", &mut b.taper_start, 0.0, 30.0, false);
                     pslider(ui, "Сужение в конце", &mut b.taper_end, 0.0, 30.0, false);
                     pslider(ui, "Толщина на концах", &mut b.taper_min, 0.0, 1.0, true);
+                    pslider(ui, "Стабилизатор (общий)", &mut cx.sh.prefs.stabilizer, 0.0, 1.0, true);
+                    pslider(ui, "Коррекция после штриха", &mut cx.sh.prefs.post_smooth, 0.0, 1.0, true);
                 }
                 7 => {
                     pslider(ui, "Нажим: размер", &mut b.p_size, 0.0, 1.0, true);
@@ -874,6 +973,7 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
                 if layer.blend != Blend::Normal { sub.push(layer.blend.name().to_string()); }
                 if layer.opacity < 1.0 { sub.push(format!("{:.0}%", layer.opacity * 100.0)); }
                 if layer.text.is_some() { sub.push("текст".into()); }
+                if let Some(v) = &layer.vector { sub.push(format!("вектор · {} линий", v.len())); }
                 if layer.locked { sub.push("закреплён".into()); }
                 let lr = ui.add(egui::Label::new(egui::RichText::new(format!("{}{}", layer.name, if sub.is_empty() { String::new() } else { format!("\n{}", sub.join(" · ")) })).size(12.5)).sense(Sense::click()).truncate());
                 if ir.clicked() || lr.clicked() { select = Some(i); }
@@ -899,6 +999,7 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
     ui.horizontal(|ui| {
         let s = Vec2::new(26.0, 24.0);
         if icon_btn(ui, "plus", false, "Новый слой", s).clicked() { ed.layer_add(); }
+        if icon_btn(ui, "vector", false, "Новый векторный слой", s).clicked() { ed.layer_add_vector(); }
         if icon_btn(ui, "copy", false, "Дублировать", s).clicked() { ed.layer_duplicate(); }
         if icon_btn(ui, "merge", false, "Объединить с нижним", s).clicked() { ed.merge_down(); }
         if icon_btn(ui, "trash", false, "Удалить слой", s).clicked() { ed.layer_delete(); }
@@ -909,6 +1010,7 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
             if ui.button("Выделить по содержимому").clicked() { ed.select_from_layer(); ui.close_menu(); }
             if ui.button("Отразить по горизонтали").clicked() { ed.layer_flip(true); ui.close_menu(); }
             if ui.button("Отразить по вертикали").clicked() { ed.layer_flip(false); ui.close_menu(); }
+            if ed.doc.layer().is_vector() && ui.button("Растеризовать").clicked() { ed.layer_rasterize(); ui.close_menu(); }
             let r = ed.doc.layer().reference;
             if ui.selectable_label(r, "Референс для заливки").clicked() { ed.layer_props(li, |x| x.reference = !r, "Референс"); ui.close_menu(); }
             if ui.button("Свести изображение").clicked() { ed.flatten_all(); ui.close_menu(); }
@@ -1033,7 +1135,7 @@ impl App {
                             });
                         });
                     });
-                    let needs_opts = !matches!(cx.ed.tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Picker | Tool::Hand | Tool::Zoom | Tool::Text);
+                    let needs_opts = !matches!(cx.ed.tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Picker | Tool::Hand | Tool::Zoom | Tool::Text) || (cx.ed.tool == Tool::Eraser && cx.ed.doc.layer().is_vector());
                     if needs_opts {
                         egui::TopBottomPanel::bottom("copts").show(ctx, |ui| { egui::ScrollArea::horizontal().show(ui, |ui| options_bar(ui, &mut cx)); });
                     }
@@ -1065,7 +1167,7 @@ impl App {
                         let mut open = true;
                         egui::Window::new("Меню").open(&mut open).default_width(300.0).vscroll(true).show(&ctx2, |ui| {
                             egui::CollapsingHeader::new("Файл").show(ui, |ui| {
-                                for (k, n) in [("new", "Новый холст"), ("save", "Сохранить"), ("export_png", "Экспорт PNG"), ("export_jpeg", "Экспорт JPEG"), ("export_psd", "Экспорт PSD"), ("export_mazok", "Экспорт .mazok"), ("export_gif", "Экспорт GIF"), ("gallery", "В галерею")] {
+                                for (k, n) in [("new", "Новый холст"), ("open", "Открыть / импорт"), ("save", "Сохранить"), ("save_as", "Сохранить как…"), ("quick_png", "Быстрый экспорт PNG"), ("export_png", "Экспорт PNG"), ("export_jpeg", "Экспорт JPEG"), ("export_psd", "Экспорт PSD"), ("export_mazok", "Экспорт .mazok"), ("export_gif", "Экспорт GIF"), ("pick_export_dir", "Папка для сохранения…"), ("import_brushes", "Импорт кистей (.abr, .sut)"), ("import_palette", "Импорт палитры"), ("insert_image", "Вставить изображение…"), ("gallery", "В галерею")] {
                                     if ui.button(n).clicked() { cx.acts.push(k); }
                                 }
                             });
@@ -1104,7 +1206,8 @@ impl App {
                 ui.heading("Мазок");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(egui::Button::new(egui::RichText::new("+ Холст").color(Color32::WHITE)).fill(ACCENT)).clicked() { self.ui.new_canvas = Some(NewCanvas::default()); }
-                    if crate::platform::can_pick_files() && ui.button("Импорт").on_hover_text("PNG, JPEG, PSD или .mazok").clicked() { self.import_files(); }
+                    if ui.button("Импорт").on_hover_text("PNG, JPEG, PSD или .mazok — или перетащите файлы в окно").clicked() { self.import_files(); }
+                    if ui.button("Вставить").on_hover_text("Новый холст из картинки в буфере обмена (Ctrl+V)").clicked() { self.clipboard_paste(None); }
                     if ui.button("Настройки").clicked() { self.ui.settings = true; }
                 });
             });
@@ -1116,7 +1219,7 @@ impl App {
         let mut exp = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.items.is_empty() {
-                ui.vertical_centered(|ui| { ui.add_space(80.0); ui.heading("Здесь будут ваши рисунки"); ui.label("Нажмите «+ Холст», чтобы начать."); });
+                ui.vertical_centered(|ui| { ui.add_space(80.0); ui.heading("Здесь будут ваши рисунки"); ui.label("Нажмите «+ Холст», чтобы начать, вставьте картинку (Ctrl+V) или перетащите файлы в окно."); });
                 return;
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1308,6 +1411,16 @@ impl App {
                 if apply { ed.filter_apply(); } else if cancel { ed.filter_cancel(); }
             }
         }
+        if let Some((i, k)) = self.ui.palette_export.take() { self.export_palette(i, k); }
+        if self.drop_hover {
+            egui::Area::new(egui::Id::new("drop")).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(24.0).show(ui, |ui| {
+                    ui.heading("Отпустите файлы");
+                    ui.label(if self.ed.is_some() { "Картинки — новыми слоями, кисти .abr/.sut — в набор «Импорт», палитры — в образцы, проекты — откроются" } else { "Картинки и проекты станут холстами, кисти и палитры добавятся в библиотеку" });
+                });
+            });
+        }
+        let mut pick_dir = false;
         if self.ui.settings {
             let mut open = true;
             let p = &mut self.sh.prefs;
@@ -1321,6 +1434,9 @@ impl App {
                 ui.separator();
                 ui.add(egui::Slider::new(&mut p.pressure_gamma, 0.4..=2.5).text("Кривая нажима (меньше — мягче)"));
                 ui.add(egui::Slider::new(&mut p.streamline_mul, 0.0..=2.0).text("Сглаживание штриха (общее)"));
+                ui.add(egui::Slider::new(&mut p.stabilizer, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)).text("Стабилизатор «ленивая кисть»")).on_hover_text("Кисть тянется за пером на нити: ровные линии без дрожания руки");
+                ui.add(egui::Slider::new(&mut p.post_smooth, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)).text("Коррекция линии после штриха"));
+                ui.horizontal(|ui| { ui.label("Векторный ластик"); vector_erase_modes(ui, &mut p.vector_erase); });
                 ui.checkbox(&mut p.touch_draw, "Рисование пальцем (иначе палец двигает холст)");
                 ui.checkbox(&mut p.hold_pick, "Пипетка при удержании");
                 ui.add(egui::Slider::new(&mut p.hold_delay, 0.2..=1.2).text("Задержка пипетки, с"));
@@ -1328,9 +1444,24 @@ impl App {
                 ui.add(egui::Slider::new(&mut p.quick_shape_delay, 0.3..=1.5).text("Задержка фигуры, с"));
                 ui.checkbox(&mut p.cursor, "Контур кисти под курсором");
                 ui.checkbox(&mut p.pick_layer, "Пипетка берёт цвет только с текущего слоя");
+                ui.separator();
+                ui.label(egui::RichText::new("Сохранение и экспорт").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Папка:");
+                    ui.label(egui::RichText::new(if p.export_dir.is_empty() { "не выбрана — каждый раз спрашивать".to_string() } else { crate::platform::folder_label(&p.export_dir) }).weak());
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Выбрать папку…").clicked() { pick_dir = true; }
+                    #[cfg(not(target_os = "android"))]
+                    if !p.export_dir.is_empty() && ui.button("Открыть в проводнике").clicked() { crate::platform::reveal(&p.export_dir); }
+                    if !p.export_dir.is_empty() && ui.button("Сбросить").clicked() { p.export_dir.clear(); p.quick_export = false; }
+                });
+                ui.add_enabled(!p.export_dir.is_empty(), egui::Checkbox::new(&mut p.quick_export, "Экспорт сразу в эту папку, без диалога"));
+                ui.label(egui::RichText::new("«Сохранить как…» всегда спрашивает место и имя файла").weak());
             });
             self.ui.settings = open;
         }
+        if pick_dir { self.pick_export_dir(); }
         if self.ui.help {
             let mut open = true;
             egui::Window::new("Справка").open(&mut open).collapsible(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).vscroll(true).show(ctx, |ui| {
@@ -1360,6 +1491,8 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+Z / Ctrl+Shift+Z", "Отменить / Повторить"), ("Ctrl+N / Ctrl+O / Ctrl+S", "Создать / Открыть / Сохранить"), ("Ctrl+T", "Свободное трансформирование"),
     ("Ctrl+J / Ctrl+E", "Дублировать слой / Объединить с нижним"), ("Ctrl+A / Ctrl+D / Ctrl+Shift+I", "Выделить всё / Снять / Инвертировать"),
     ("Пробел + перетаскивание", "Сдвиг холста"), ("Колесо мыши", "Масштаб"), ("Alt или правая кнопка", "Пипетка"), ("Ctrl+0 / Ctrl+1 / F", "Вписать / 100% / Зеркальный вид"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Копировать / вырезать / вставить (в том числе картинки из других программ)"), ("Ctrl+Shift+S", "Сохранить как… (выбор папки)"),
+    ("Перетаскивание файлов в окно", "Картинки, проекты, кисти .abr/.sut, палитры"), ("Alt + колесо мыши", "Размер кисти"), ("1 … 9, 0", "Непрозрачность 10…100 %"),
     ("Tab", "Скрыть панели"), ("Удержание пера", "Пипетка"), ("Задержка в конце штриха", "Быстрая фигура: линия, круг, многоугольник"),
     ("2 пальца — касание", "Отменить"), ("3 пальца — касание", "Повторить"), ("2 пальца — движение", "Сдвиг, масштаб, поворот"), ("4 пальца — касание", "Скрыть панели"),
 ];

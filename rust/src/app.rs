@@ -22,8 +22,42 @@ pub struct GalleryItem {
     pub modified: i64,
 }
 
+/// Зачем открываются файлы.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Purpose { Import, InsertImage, Brushes, Palette, TipImage, GrainImage }
+
+impl Purpose {
+    fn spec(self) -> (&'static str, &'static str, &'static [&'static str], bool) {
+        match self {
+            Purpose::Import => ("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "psd", "mazok", "zip"], true),
+            Purpose::InsertImage => ("Вставить изображение", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp", "gif"], true),
+            Purpose::Brushes => ("Импорт кистей", "Кисти Photoshop и Clip Studio", &["abr", "sut"], true),
+            Purpose::Palette => ("Импорт палитры", "Палитры", &crate::palette::EXTS, true),
+            Purpose::TipImage => ("Форма отпечатка из картинки", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp"], false),
+            Purpose::GrainImage => ("Текстура из картинки", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp"], false),
+        }
+    }
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn mimes(self) -> &'static str {
+        match self {
+            Purpose::InsertImage | Purpose::TipImage | Purpose::GrainImage => "image/*",
+            _ => "*/*",
+        }
+    }
+}
+
+/// Ожидание результата системного диалога (Android).
+pub enum Pending {
+    Open(Purpose),
+    Save { bytes: Vec<u8>, name: String, mime: String },
+    Folder,
+}
+
 pub struct App {
     pub sh: Shared,
+    pub pending: Option<Pending>,
+    /// Наведены ли файлы на окно (перетаскивание).
+    pub drop_hover: bool,
     pub ed: Option<Editor>,
     pub items: Vec<GalleryItem>,
     pub tex: HashMap<String, (u64, egui::TextureHandle)>,
@@ -72,8 +106,9 @@ impl App {
         let docs_dir = data_dir.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        crate::platform::install_paste_hook();
         let mut app = App {
-            sh, ed: None, items: vec![], tex: HashMap::new(), ui: UiState::default(), saver: None, fonts: platform::fonts(), toast: None,
+            sh, pending: None, drop_hover: false, ed: None, items: vec![], tex: HashMap::new(), ui: UiState::default(), saver: None, fonts: platform::fonts(), toast: None,
             now: 0.0, docs_dir, visuals: None, last_settings_save: 0.0, test: crate::autotest::AutoTest::from_env(),
             focused: true, force_save: false,
         };
@@ -215,34 +250,196 @@ impl App {
         }
     }
 
+    /* ---------- открытие файлов ---------- */
+
     pub fn import_files(&mut self) {
-        if !platform::can_pick_files() {
-            self.toast("Открытие файлов на Android пока недоступно");
-            return;
+        self.request_open(Purpose::Import);
+    }
+
+    pub fn insert_image(&mut self) {
+        self.request_open(Purpose::InsertImage);
+    }
+
+    /// Открыть системный диалог выбора файлов для цели purpose.
+    pub fn request_open(&mut self, purpose: Purpose) {
+        let (title, name, exts, multiple) = purpose.spec();
+        #[cfg(not(target_os = "android"))]
+        {
+            let files = platform::pick_files(title, name, exts, multiple, &mut self.sh.prefs.last_dir);
+            self.handle_open(purpose, files);
         }
-        let files = platform::pick_files("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "webp", "psd", "mazok", "zip"], true);
-        let mut last = None;
-        for (name, bytes) in files {
-            match formats::import(&bytes, &name) {
-                Ok(d) => {
-                    let _ = write_doc(&self.docs_dir, &d);
-                    last = Some(d);
-                }
-                Err(e) => self.toast(format!("{name}: {e}")),
+        #[cfg(target_os = "android")]
+        {
+            let _ = (title, name, exts);
+            match platform::android::open(purpose.mimes(), multiple) {
+                Ok(()) => self.pending = Some(Pending::Open(purpose)),
+                Err(e) => self.toast(format!("Не удалось открыть выбор файлов: {e}")),
             }
         }
-        self.refresh_gallery();
-        if let Some(d) = last {
+    }
+
+    /// Обработать выбранные или перетащенные файлы.
+    pub fn handle_open(&mut self, purpose: Purpose, files: Vec<(String, Vec<u8>)>) {
+        if files.is_empty() { return; }
+        match purpose {
+            Purpose::Import => {
+                let mut last = None;
+                for (name, bytes) in files {
+                    match formats::import(&bytes, &name) {
+                        Ok(d) => { let _ = write_doc(&self.docs_dir, &d); last = Some(d); }
+                        Err(e) => self.toast(format!("{name}: {e}")),
+                    }
+                }
+                self.refresh_gallery();
+                if let Some(d) = last { self.open_document(d); }
+            }
+            Purpose::InsertImage => {
+                for (name, bytes) in files {
+                    match formats::decode_image(&bytes) {
+                        Ok(img) => {
+                            let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            self.add_image(img, &stem);
+                        }
+                        Err(e) => self.toast(e),
+                    }
+                }
+            }
+            Purpose::Brushes => {
+                let mut total = 0;
+                let mut first = None;
+                for (name, bytes) in files {
+                    match crate::brushio::import(&bytes, &name) {
+                        Ok(list) => { total += list.len(); let f = self.sh.brushes.add_imported(list); first = first.or(f); }
+                        Err(e) => self.toast(format!("{name}: {e}")),
+                    }
+                }
+                if total > 0 {
+                    self.sh.brushes.save();
+                    self.ui.brush_cat = "imported".into();
+                    if let Some(id) = first {
+                        // новая кисть — сразу в руку (для инструмента «Кисть»)
+                        self.sh.tools.brush.brush_id = id;
+                        if let Some(ed) = &mut self.ed { if ed.tool != Tool::Brush { ed.set_tool(Tool::Brush); } }
+                    }
+                    self.toast(format!("Импортировано кистей: {total} (набор «Импорт»)"));
+                }
+            }
+            Purpose::Palette => {
+                let mut n = 0;
+                for (name, bytes) in files {
+                    match crate::palette::import(&bytes, &name) {
+                        Ok(list) => { for p in list { self.sh.palettes.push(p); n += 1; } }
+                        Err(e) => self.toast(format!("{name}: {e}")),
+                    }
+                }
+                if n > 0 {
+                    self.sh.palette = self.sh.palettes.len() - 1;
+                    self.sh.save();
+                    self.toast(format!("Добавлено палитр: {n}"));
+                }
+            }
+            Purpose::TipImage | Purpose::GrainImage => {
+                let Some((_, bytes)) = files.into_iter().next() else { return };
+                let Ok(img) = formats::decode_image(&bytes) else { self.toast("Не удалось открыть картинку"); return };
+                let Some(ed) = &self.ed else { return };
+                let id = crate::editor::tool_state(&self.sh, ed.tool).brush_id.clone();
+                let mut b = self.sh.brushes.get(&id).clone();
+                if purpose == Purpose::TipImage {
+                    b.shape = crate::brush::add_tip_image(crate::brush::tip_mask_from_image(&img));
+                } else {
+                    b.grain = Some(crate::brush::add_grain_image(crate::brush::grain_from_image(&img)));
+                    if b.grain_strength <= 0.0 { b.grain_strength = 0.6; }
+                }
+                self.sh.brushes.update(b);
+                self.sh.brushes.save();
+                self.toast(if purpose == Purpose::TipImage { "Форма отпечатка обновлена" } else { "Текстура кисти обновлена" });
+            }
+        }
+    }
+
+    /// Картинка в новый слой (в редакторе) или новый холст (в галерее).
+    pub fn add_image(&mut self, img: Img, name: &str) {
+        if let Some(ed) = &mut self.ed {
+            ed.layer_add_image(img, if name.is_empty() { "Вставка" } else { name });
+            ed.set_tool(Tool::Transform);
+            self.toast("Изображение добавлено новым слоем — подвиньте и нажмите Enter");
+        } else {
+            let (w, h) = (img.w.min(8192), img.h.min(8192));
+            let img = if (w, h) != (img.w, img.h) { img.resize(w, h) } else { img };
+            let mut d = Document::new(if name.is_empty() { "Вставка" } else { name }, w, h, [255, 255, 255], true);
+            d.layers[0].img = std::sync::Arc::new(img);
+            let _ = write_doc(&self.docs_dir, &d);
+            self.refresh_gallery();
             self.open_document(d);
         }
     }
 
-    pub fn export_doc_from_gallery(&mut self, id: &str) {
-        if let Ok(b) = std::fs::read(self.docs_dir.join(format!("{id}.mazok"))) {
-            let name = self.items.iter().find(|i| i.id == id).map(|i| i.name.clone()).unwrap_or_else(|| "Рисунок".into());
-            self.save_result(platform::save_bytes(&format!("{}.mazok", safe_name(&name)), "application/zip", &b));
+    /// Файлы по расширению: кисти, палитры, проекты или картинки.
+    pub fn open_by_ext(&mut self, files: Vec<(String, Vec<u8>)>) {
+        let mut groups: Vec<(Purpose, Vec<(String, Vec<u8>)>)> = vec![];
+        for (name, bytes) in files {
+            let ext = Path::new(&name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let p = match ext.as_str() {
+                "abr" | "sut" => Purpose::Brushes,
+                e if crate::palette::EXTS.contains(&e) => Purpose::Palette,
+                "psd" | "mazok" | "zip" => Purpose::Import,
+                _ => if self.ed.is_some() { Purpose::InsertImage } else { Purpose::Import },
+            };
+            match groups.iter_mut().find(|g| g.0 == p) { Some(g) => g.1.push((name, bytes)), None => groups.push((p, vec![(name, bytes)])) }
+        }
+        for (p, f) in groups { self.handle_open(p, f); }
+    }
+
+    /* ---------- буфер обмена ---------- */
+
+    pub fn clipboard_copy(&mut self, merged: bool) {
+        let Some(ed) = &mut self.ed else { return };
+        ed.copy(merged);
+        if let Some((img, _, _)) = &ed.clipboard {
+            platform::set_clipboard_image(img);
         }
     }
+
+    pub fn clipboard_cut(&mut self) {
+        let Some(ed) = &mut self.ed else { return };
+        ed.cut();
+        if let Some((img, _, _)) = &ed.clipboard {
+            platform::set_clipboard_image(img);
+        }
+    }
+
+    /// Вставка: картинка из системного буфера, скопированные файлы, путь к файлу или внутренний буфер.
+    pub fn clipboard_paste(&mut self, text: Option<String>) {
+        let ours = platform::clipboard_is_ours();
+        if let Some(ed) = &mut self.ed {
+            if ours && ed.clipboard.is_some() { ed.paste(); return; }
+        }
+        if let Some(img) = platform::clipboard_image() {
+            self.add_image(img, "Вставка");
+            return;
+        }
+        let files = platform::clipboard_files();
+        if !files.is_empty() {
+            let f = platform::read_paths(&files);
+            self.open_by_ext(f);
+            return;
+        }
+        if let Some(t) = text {
+            let p = PathBuf::from(t.trim().trim_matches('"').trim_start_matches("file:///"));
+            if p.is_file() {
+                let f = platform::read_paths(&[p]);
+                self.open_by_ext(f);
+                return;
+            }
+        }
+        match &mut self.ed {
+            Some(ed) if ed.clipboard.is_some() => ed.paste(),
+            Some(_) => self.toast("В буфере обмена нет изображения"),
+            None => self.toast("Скопируйте картинку и нажмите Ctrl+V, чтобы создать из неё холст"),
+        }
+    }
+
+    /* ---------- сохранение ---------- */
 
     pub fn save_result(&mut self, r: Result<String, String>) {
         match r {
@@ -252,21 +449,100 @@ impl App {
         }
     }
 
+    /// Сохранить файл: в папку для экспорта (если включено) или через диалог «Сохранить как».
+    pub fn save_file(&mut self, name: &str, mime: &str, bytes: Vec<u8>, ask: bool) {
+        let dir = self.sh.prefs.export_dir.clone();
+        if !ask && self.sh.prefs.quick_export && !dir.is_empty() {
+            let r = platform::write_in_folder(&dir, name, mime, &bytes);
+            if r.is_ok() { self.save_result(r); return; }
+            if let Err(e) = r { self.toast(e); }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = mime;
+            let r = platform::save_dialog(name, &bytes, &mut self.sh.prefs.last_dir);
+            self.save_result(r);
+        }
+        #[cfg(target_os = "android")]
+        {
+            match platform::android::create(name, mime) {
+                Ok(()) => self.pending = Some(Pending::Save { bytes, name: name.to_string(), mime: mime.to_string() }),
+                Err(_) => { let r = platform::save_bytes(name, mime, &bytes); self.save_result(r); }
+            }
+        }
+    }
+
+    /// Выбрать папку для быстрого экспорта.
+    pub fn pick_export_dir(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        {
+            if let Some(d) = platform::pick_folder(&self.sh.prefs.export_dir) {
+                self.sh.prefs.export_dir = d;
+                self.sh.prefs.quick_export = true;
+                self.sh.save();
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            match platform::android::tree() {
+                Ok(()) => self.pending = Some(Pending::Folder),
+                Err(e) => self.toast(format!("Не удалось открыть выбор папки: {e}")),
+            }
+        }
+    }
+
+    /// Результат системного диалога (Android).
+    fn poll_pending(&mut self, ctx: &egui::Context) {
+        if self.pending.is_none() { return; }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        #[cfg(target_os = "android")]
+        {
+            let Some(r) = platform::android::poll() else { return };
+            let Some(p) = self.pending.take() else { return };
+            if !r.ok || r.uris.is_empty() { return; }
+            match p {
+                Pending::Open(purpose) => {
+                    let files: Vec<(String, Vec<u8>)> = r.uris.iter().filter_map(|u| platform::android::read(u)).collect();
+                    if files.is_empty() { self.toast("Не удалось прочитать файл"); }
+                    self.handle_open(purpose, files);
+                }
+                Pending::Save { bytes, name, .. } => {
+                    let res = platform::android::write(&r.uris[0], &bytes).map(|_| format!("Сохранено: {name}"));
+                    self.save_result(res);
+                }
+                Pending::Folder => {
+                    self.sh.prefs.export_dir = r.uris[0].clone();
+                    self.sh.prefs.quick_export = true;
+                    self.sh.save();
+                    self.toast(format!("Папка для сохранения: {}", platform::folder_label(&r.uris[0])));
+                }
+            }
+        }
+    }
+
+    pub fn export_doc_from_gallery(&mut self, id: &str) {
+        if let Ok(b) = std::fs::read(self.docs_dir.join(format!("{id}.mazok"))) {
+            let name = self.items.iter().find(|i| i.id == id).map(|i| i.name.clone()).unwrap_or_else(|| "Рисунок".into());
+            self.save_file(&format!("{}.mazok", safe_name(&name)), "application/zip", b, true);
+        }
+    }
+
     /* ---------- экспорт ---------- */
 
-    pub fn export(&mut self, kind: &str) {
+    /// Экспорт; ask — всегда спрашивать место («Сохранить как»).
+    pub fn export_as(&mut self, kind: &str, ask: bool) {
         let Some(ed) = &mut self.ed else { return };
         ed.commit_pending();
         let d = &ed.doc;
         let base = safe_name(&d.name);
-        let res = match kind {
-            "png" => platform::save_bytes(&format!("{base}.png"), "image/png", &formats::png(&doc::flatten(d, true))),
-            "jpeg" => platform::save_bytes(&format!("{base}.jpg"), "image/jpeg", &formats::jpeg(&doc::flatten(d, true), [255, 255, 255])),
-            "psd" => platform::save_bytes(&format!("{base}.psd"), "image/vnd.adobe.photoshop", &formats::psd_write(d)),
-            "mazok" => platform::save_bytes(&format!("{base}.mazok"), "application/zip", &formats::save_mazok(d)),
+        let out: Result<(String, &str, Vec<u8>), String> = match kind {
+            "png" => Ok((format!("{base}.png"), "image/png", formats::png(&doc::flatten(d, true)))),
+            "jpeg" => Ok((format!("{base}.jpg"), "image/jpeg", formats::jpeg(&doc::flatten(d, true), [255, 255, 255]))),
+            "psd" => Ok((format!("{base}.psd"), "image/vnd.adobe.photoshop", formats::psd_write(d))),
+            "mazok" => Ok((format!("{base}.mazok"), "application/zip", formats::save_mazok(d))),
             "layers" => {
                 let files: Vec<(String, Vec<u8>)> = d.layers.iter().enumerate().map(|(i, l)| (format!("{:02} {}.png", i + 1, safe_name(&l.name)), formats::png(&l.img))).collect();
-                platform::save_bytes(&format!("{base} — слои.zip"), "application/zip", &formats::zip_write(&files))
+                Ok((format!("{base} — слои.zip"), "application/zip", formats::zip_write(&files)))
             }
             "gif" => {
                 let k = (720.0 / d.w.max(d.h) as f32).min(1.0);
@@ -276,35 +552,26 @@ impl App {
                     if l.visible { f.draw_over(0, 0, &l.img, l.opacity); }
                     f.resize(w, h)
                 }).collect();
-                match formats::gif(&frames, 12) {
-                    Ok(b) => platform::save_bytes(&format!("{base}.gif"), "image/gif", &b),
-                    Err(e) => Err(e),
-                }
+                formats::gif(&frames, 12).map(|b| (format!("{base}.gif"), "image/gif", b))
             }
             _ => Err(String::new()),
         };
-        self.save_result(res);
-    }
-
-    pub fn insert_image(&mut self) {
-        let files = platform::pick_files("Вставить изображение", "Изображения", &["png", "jpg", "jpeg", "webp"], false);
-        if !platform::can_pick_files() {
-            self.toast("Открытие файлов на Android пока недоступно");
-        }
-        for (name, bytes) in files {
-            match formats::decode_image(&bytes) {
-                Ok(img) => {
-                    if let Some(ed) = &mut self.ed {
-                        let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                        ed.layer_add_image(img, &stem);
-                        ed.set_tool(Tool::Transform);
-                    }
-                }
-                Err(e) => self.toast(e),
-            }
+        match out {
+            Ok((name, mime, bytes)) => self.save_file(&name, mime, bytes, ask),
+            Err(e) => self.save_result(Err(e)),
         }
     }
 
+    pub fn export(&mut self, kind: &str) {
+        self.export_as(kind, false);
+    }
+
+    /// Экспорт палитры.
+    pub fn export_palette(&mut self, i: usize, kind: &str) {
+        let Some(p) = self.sh.palettes.get(i).cloned() else { return };
+        let (name, mime, bytes) = crate::palette::export(&p, kind);
+        self.save_file(&name, mime, bytes, true);
+    }
     /* ---------- команды ---------- */
 
     pub fn act(&mut self, a: &str) {
@@ -314,6 +581,17 @@ impl App {
             "save" => { self.save_sync(); self.toast("Сохранено"); }
             "gallery" => self.to_gallery(),
             "insert_image" => self.insert_image(),
+            "save_as" => self.export_as("mazok", true),
+            "quick_png" => self.export_as("png", false),
+            "import_brushes" => self.request_open(Purpose::Brushes),
+            "import_palette" => self.request_open(Purpose::Palette),
+            "tip_image" => self.request_open(Purpose::TipImage),
+            "grain_image" => self.request_open(Purpose::GrainImage),
+            "pick_export_dir" => self.pick_export_dir(),
+            "paste" => self.clipboard_paste(None),
+            "copy" => self.clipboard_copy(false),
+            "copy_merged" => self.clipboard_copy(true),
+            "cut" => self.clipboard_cut(),
             _ => {}
         }
         let sh = &mut self.sh;
@@ -322,13 +600,11 @@ impl App {
             "undo" => ed.undo(),
             "redo" => ed.redo(),
             "layer_new" => ed.layer_add(),
+            "layer_new_vector" => ed.layer_add_vector(),
+            "rasterize" => ed.layer_rasterize(),
             "sel_all" => ed.select_all(),
             "sel_none" => ed.select_none(),
             "sel_invert" => ed.select_invert(),
-            "copy" => ed.copy(false),
-            "copy_merged" => ed.copy(true),
-            "cut" => ed.cut(),
-            "paste" => ed.paste(),
             "dup_or_copy" => { if ed.sel.is_some() { ed.copy_to_layer(false) } else { ed.layer_duplicate() } }
             "cut_layer" => ed.copy_to_layer(true),
             "merge" => ed.merge_down(),
@@ -369,6 +645,12 @@ impl App {
                 else if ed.ui_hidden { ed.ui_hidden = false; }
             }
             "toggle_ui" => ed.ui_hidden = !ed.ui_hidden,
+            o if o.starts_with("opacity_") => {
+                let v: f32 = o[8..].parse().unwrap_or(10.0);
+                let ts = ed.tool_state_mut(sh);
+                ts.opacity = (v / 10.0).clamp(0.01, 1.0);
+                ed.toast(&format!("Непрозрачность: {:.0}%", v * 10.0));
+            }
             _ => {}
         }
     }
@@ -410,6 +692,40 @@ pub fn safe_name(s: &str) -> String {
     if t.is_empty() { "Без названия".into() } else { t }
 }
 
+impl App {
+    /// Ctrl+C / Ctrl+X / Ctrl+V (egui сообщает их событиями, а не клавишами).
+    fn clipboard_events(&mut self, ctx: &egui::Context) {
+        let (mut copy, mut cut, mut paste) = (false, false, None);
+        let shift = ctx.input(|i| i.modifiers.shift);
+        ctx.input(|i| for e in &i.events {
+            match e {
+                egui::Event::Copy => copy = true,
+                egui::Event::Cut => cut = true,
+                egui::Event::Paste(t) => paste = Some(t.clone()),
+                _ => {}
+            }
+        });
+        let key = platform::take_paste_request();
+        if ctx.wants_keyboard_input() || self.ui.text.is_some() { return; }
+        if copy { self.clipboard_copy(shift); }
+        if cut { self.clipboard_cut(); }
+        if key || paste.is_some() { self.clipboard_paste(paste); }
+    }
+
+    /// Файлы, перетащенные на окно.
+    fn dropped_files(&mut self, ctx: &egui::Context) {
+        let (hover, dropped) = ctx.input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.clone()));
+        self.drop_hover = hover;
+        if dropped.is_empty() { return; }
+        let files: Vec<(String, Vec<u8>)> = dropped.into_iter().filter_map(|f| {
+            let name = f.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or(f.name.clone());
+            let bytes = match (&f.bytes, &f.path) { (Some(b), _) => b.to_vec(), (None, Some(p)) => std::fs::read(p).ok()?, _ => return None };
+            Some((name, bytes))
+        }).collect();
+        self.open_by_ext(files);
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.now = ctx.input(|i| i.time);
@@ -423,6 +739,9 @@ impl eframe::App for App {
             self.sh.save();
         }
         self.focused = focused;
+        self.poll_pending(ctx);
+        self.clipboard_events(ctx);
+        self.dropped_files(ctx);
         let mut action: Option<String> = None;
         if let Some(ed) = &mut self.ed {
             action = ed.keys(ctx, &mut self.sh).map(|a| a.to_string());

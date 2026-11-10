@@ -167,6 +167,8 @@ pub struct LayerMeta {
     pub locked: bool,
     pub reference: bool,
     pub text: Option<TextSpec>,
+    /// "vector" — векторный слой (штрихи в layers/<id>.vec.json).
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -220,6 +222,7 @@ pub fn meta(doc: &Document) -> DocMeta {
             locked: l.locked,
             reference: l.reference,
             text: l.text.clone(),
+            kind: if l.is_vector() { Some("vector".into()) } else { None },
         }).collect(),
         format: "mazok".into(),
         version: 1,
@@ -235,6 +238,9 @@ pub fn save_mazok(doc: &Document) -> Vec<u8> {
         doc.layers.par_iter().map(|l| (format!("layers/{}.png", l.id), png(&l.img))).collect()
     };
     files.extend(pngs);
+    for l in doc.layers.iter() {
+        if let Some(v) = &l.vector { files.push((format!("layers/{}.vec.json", l.id), crate::vector::to_json(v))); }
+    }
     files.push(("preview.png".into(), png(&doc::flatten(doc, true).thumbnail(512))));
     zip_write(&files)
 }
@@ -271,6 +277,10 @@ pub fn load_mazok(bytes: &[u8]) -> Result<Document, String> {
         l.locked = lm.locked;
         l.reference = lm.reference;
         l.text = lm.text.clone();
+        if lm.kind.as_deref() == Some("vector") {
+            let v = z.get(&format!("layers/{}.vec.json", lm.id)).and_then(|b| crate::vector::from_json(b)).unwrap_or_default();
+            l.vector = Some(Arc::new(v));
+        }
         if let Some(p) = z.get(&format!("layers/{}.png", lm.id)) {
             if let Ok(img) = decode_image(p) {
                 let mut full = Img::new(m.w, m.h);

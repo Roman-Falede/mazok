@@ -23,6 +23,18 @@ pub struct Prefs {
     pub cursor: bool,
     pub ui_scale: f32,
     pub clone_aligned: bool,
+    /// Стабилизатор «ленивая кисть» 0…1.
+    pub stabilizer: f32,
+    /// Сглаживание линии после завершения штриха 0…1.
+    pub post_smooth: f32,
+    /// Режим векторного ластика: touch / whole / intersect.
+    pub vector_erase: String,
+    /// Папка для быстрого экспорта (на Android — адрес папки из системного выбора).
+    pub export_dir: String,
+    /// Сохранять экспорт сразу в папку, без диалога.
+    pub quick_export: bool,
+    /// Последняя папка в диалогах открытия и сохранения.
+    pub last_dir: String,
 }
 
 impl Default for Prefs {
@@ -30,7 +42,8 @@ impl Default for Prefs {
         Prefs {
             pressure_gamma: 1.0, streamline_mul: 1.0, fill_tol: 22.0, fill_expand: 1, fill_all_layers: false, pick_layer: false,
             quick_shape: true, quick_shape_delay: 0.65, hold_pick: true, hold_delay: 0.45, touch_draw: true, ui_mode: "auto".into(),
-            light: false, cursor: true, ui_scale: 1.0, clone_aligned: true,
+            light: false, cursor: true, ui_scale: 1.0, clone_aligned: true, stabilizer: 0.0, post_smooth: 0.0, vector_erase: "intersect".into(),
+            export_dir: String::new(), quick_export: false, last_dir: String::new(),
         }
     }
 }
@@ -101,14 +114,17 @@ impl Colors {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
 pub struct Palette {
     pub name: String,
     pub colors: Vec<[u8; 3]>,
+    /// Названия цветов (если были в файле).
+    pub names: Vec<String>,
 }
 
 pub fn default_palettes() -> Vec<Palette> {
-    let p = |name: &str, hexes: &[&str]| Palette { name: name.into(), colors: hexes.iter().filter_map(|h| crate::util::parse_hex(h)).collect() };
+    let p = |name: &str, hexes: &[&str]| Palette { name: name.into(), colors: hexes.iter().filter_map(|h| crate::util::parse_hex(h)).collect(), names: vec![] };
     vec![
         p("Базовая", &["#000000", "#3d3d3d", "#7a7a7a", "#bdbdbd", "#ffffff", "#e53935", "#fb8c00", "#fdd835", "#43a047", "#1e88e5", "#3949ab", "#8e24aa", "#6d4c41", "#f48fb1", "#80deea"]),
         p("Кожа", &["#ffe0c7", "#f9c9a4", "#eab08c", "#d89a73", "#c18060", "#a26849", "#83503a", "#653c2c", "#4a2b20", "#2e1a14", "#f2b8a0", "#e3967f"]),
@@ -125,6 +141,7 @@ struct SavedState {
     tools: ToolStates,
     colors: Colors,
     palettes: Vec<Palette>,
+    palette: usize,
 }
 
 pub struct Shared {
@@ -133,19 +150,22 @@ pub struct Shared {
     pub colors: Colors,
     pub tools: ToolStates,
     pub palettes: Vec<Palette>,
+    /// Выбранная палитра.
+    pub palette: usize,
     pub data_dir: PathBuf,
 }
 
 impl Shared {
     pub fn load(data_dir: PathBuf) -> Shared {
         let _ = std::fs::create_dir_all(&data_dir);
+        crate::brush::set_assets_dir(data_dir.clone());
         let brushes = BrushLib::load(Some(data_dir.join("brushes.json")));
         let saved: SavedState = std::fs::read_to_string(data_dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let palettes = if saved.palettes.is_empty() { default_palettes() } else { saved.palettes };
-        Shared { brushes, prefs: saved.prefs, colors: saved.colors, tools: saved.tools, palettes, data_dir }
+        Shared { brushes, prefs: saved.prefs, colors: saved.colors, tools: saved.tools, palette: saved.palette.min(palettes.len().saturating_sub(1)), palettes, data_dir }
     }
     pub fn save(&self) {
-        let s = SavedState { prefs: self.prefs.clone(), tools: self.tools.clone(), colors: self.colors.clone(), palettes: self.palettes.clone() };
+        let s = SavedState { prefs: self.prefs.clone(), tools: self.tools.clone(), colors: self.colors.clone(), palettes: self.palettes.clone(), palette: self.palette };
         if let Ok(j) = serde_json::to_string_pretty(&s) {
             let _ = std::fs::write(self.data_dir.join("settings.json"), j);
         }

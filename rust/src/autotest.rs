@@ -155,18 +155,83 @@ impl AutoTest {
         s.push_back(run(Box::new(|a, l| {
             let id = a.items.first().map(|i| i.id.clone()).unwrap_or_default();
             a.open_doc(&id);
-            let ok = a.ed.as_ref().map_or(false, |e| e.doc.layers.len() == 4 && e.doc.layers.iter().any(|l| l.text.is_some()));
+            let ok = a.ed.as_ref().map_or(false, |e| e.doc.layers.len() >= 4 && e.doc.layers.iter().any(|l| l.text.is_some()));
             l.check(ok, "рисунок снова открыт из галереи со всеми слоями");
+            // векторный слой: три линии, потом ластик «до пересечения»
+            a.sh.prefs.stabilizer = 0.0;
+            a.ed.as_mut().unwrap().layer_add_vector();
+            brush(a, "pencil_hb", 0.3, [20, 20, 30]);
+        })));
+        s.push_back(Step::Stroke((0..=30).map(|i| (0.15 + 0.7 * i as f32 / 30.0, 0.5)).collect()));
+        s.push_back(Step::Stroke((0..=30).map(|i| (0.4, 0.2 + 0.6 * i as f32 / 30.0)).collect()));
+        s.push_back(Step::Stroke((0..=30).map(|i| (0.6, 0.2 + 0.6 * i as f32 / 30.0)).collect()));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_mut().unwrap();
+            let n = ed.doc.layer().vector.as_ref().map_or(0, |v| v.len());
+            l.check(n == 3, format!("векторный слой: нарисовано линий {n} из 3"));
+            l.check(alpha_at(ed, 0.3, 0.5) > 150, "векторная линия видна на холсте");
+            ed.set_tool(Tool::Eraser);
+            a.sh.prefs.vector_erase = "intersect".into();
+            let ts = ed.tool_state_mut(&mut a.sh);
+            ts.size = 0.12;
+        })));
+        s.push_back(Step::Click(0.5, 0.5));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_mut().unwrap();
+            let n = ed.doc.layer().vector.as_ref().map_or(0, |v| v.len());
+            l.check(n == 4, format!("ластик «до пересечения»: горизонталь разрезана на 2 части (линий {n})"));
+            l.check(alpha_at(ed, 0.5, 0.5) < 10 && alpha_at(ed, 0.3, 0.5) > 150 && alpha_at(ed, 0.7, 0.5) > 150, format!("стёрт только участок между пересечениями ({} / {} / {})", alpha_at(ed, 0.3, 0.5), alpha_at(ed, 0.5, 0.5), alpha_at(ed, 0.7, 0.5)));
+            ed.undo();
+            let n1 = ed.doc.layer().vector.as_ref().map_or(0, |v| v.len());
+            let a1 = alpha_at(ed, 0.5, 0.5);
+            ed.redo();
+            let n2 = ed.doc.layer().vector.as_ref().map_or(0, |v| v.len());
+            l.check(n1 == 3 && a1 > 150 && n2 == 4, format!("отмена и повтор векторного ластика ({n1} → {n2})"));
+            let mz = formats::save_mazok(&ed.doc);
+            let ok = formats::load_mazok(&mz).map_or(false, |d| d.layers.iter().any(|x| x.vector.as_ref().map_or(false, |v| v.len() == 4)));
+            l.check(ok, ".mazok сохраняет векторные линии");
+            let before = ed.doc.layer().img.content_bounds();
+            ed.resize_canvas(3200, 2400, 0, 0, true);
+            let v = ed.doc.layer().vector.clone().unwrap_or_default();
+            let wide = v.iter().any(|s| s.size > 3.0 * 1.5);
+            l.check(before.is_some() && ed.doc.w == 3200 && wide, "увеличение холста перерисовало векторный слой без потери резкости");
+            ed.undo();
+            ed.fit();
+        })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("07-vector-eraser.png"));
+        s.push_back(run(Box::new(|a, l| clipboard_test(a, l))));
+        s.push_back(Step::Wait(8));
+        s.push_back(run(Box::new(|a, l| clipboard_finish(a, l))));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| import_test(a, l))));
+        s.push_back(run(Box::new(|a, _| { a.ui.dock_tab[0] = 1; a.ui.dock_tab[1] = 0; a.ui.brush_cat = "imported".into(); })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("08-palettes-imported-brushes.png"));
+        s.push_back(run(Box::new(|a, _| {
+            // стабилизатор: дрожащая линия
+            a.sh.prefs.stabilizer = 0.5;
+            brush(a, "pencil_hb", 0.3, [200, 40, 40]);
+            a.ed.as_mut().unwrap().layer_add();
+        })));
+        s.push_back(Step::Stroke((0..=80).map(|i| { let t = i as f32 / 80.0; (0.1 + 0.8 * t, 0.85 + if i % 2 == 0 { 0.012 } else { -0.012 }) }).collect()));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_mut().unwrap();
+            let b = ed.doc.layer().img.content_bounds();
+            let h = b.map_or(0, |b| b.h);
+            l.check(b.is_some() && h < 40, format!("стабилизатор сгладил дрожание (высота линии {h} px)"));
+            a.sh.prefs.stabilizer = 0.0;
             a.ui.new_canvas = Some(crate::ui::NewCanvas::default());
         })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("07-new-canvas.png"));
+        s.push_back(Step::Shot("09-new-canvas.png"));
         s.push_back(run(Box::new(|a, _| { a.ui.new_canvas = None; a.ui.settings = true; })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("08-settings.png"));
+        s.push_back(Step::Shot("10-settings.png"));
         s.push_back(run(Box::new(|a, _| { a.ui.settings = false; a.sh.prefs.light = true; })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("09-light.png"));
+        s.push_back(Step::Shot("11-light.png"));
         s.push_back(run(Box::new(|a, _| { a.sh.prefs.light = false; })));
         s.push_back(Step::Quit);
         Some(AutoTest { dir, steps: s, stroke: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
@@ -321,4 +386,171 @@ fn roundtrip(a: &mut App, l: &mut AutoLog) {
     l.check(formats::decode_image(&jpg).is_ok(), format!("экспорт JPEG ({} КБ)", jpg.len() / 1024));
     let frames: Vec<Img> = d.layers.iter().map(|x| x.img.resize(320, 240)).collect();
     l.check(formats::gif(&frames, 12).is_ok(), "экспорт GIF");
+}
+
+/// Прозрачность пикселя активного слоя в точке холста (доли области просмотра).
+fn alpha_at(ed: &crate::editor::Editor, x: f32, y: f32) -> u8 {
+    let r = ed.canvas_rect;
+    let (dx, dy) = ed.view.to_doc(Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y));
+    let img = &ed.doc.layer().img;
+    // максимум в окрестности 7×7 — у карандаша зернистая текстура
+    let mut m = 0;
+    for oy in -3..=3 {
+        for ox in -3..=3 {
+            let (x, y) = (dx as i32 + ox, dy as i32 + oy);
+            if x < 0 || y < 0 || x as usize >= img.w || y as usize >= img.h { continue; }
+            m = m.max(img.px[img.idx(x as usize, y as usize) + 3]);
+        }
+    }
+    m
+}
+
+/// Вставка картинки из системного буфера обмена и копирование в него.
+/// Содержимое буфера пользователя сохраняется и восстанавливается.
+fn clipboard_test(a: &mut App, l: &mut AutoLog) {
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut cb = match arboard::Clipboard::new() { Ok(c) => c, Err(e) => { l.check(false, format!("буфер обмена недоступен: {e}")); return; } };
+        let saved_text = cb.get_text().ok();
+        let saved_img = cb.get_image().ok().map(|i| (i.width, i.height, i.bytes.into_owned()));
+        let (w, h) = (120usize, 80usize);
+        let mut px = vec![0u8; w * h * 4];
+        for p in px.chunks_exact_mut(4) { p.copy_from_slice(&[230, 40, 40, 255]); }
+        let set = cb.set_image(arboard::ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(px) }).is_ok();
+        l.check(set, "в буфер обмена положена картинка другой программы");
+        let n0 = a.ed.as_ref().map_or(0, |e| e.doc.layers.len());
+        a.clipboard_paste(None);
+        let ed = a.ed.as_mut().unwrap();
+        let ok = ed.doc.layers.len() == n0 + 1 && ed.tool == Tool::Transform;
+        a.act("enter");
+        let ed = a.ed.as_mut().unwrap();
+        let b = ed.doc.layer().img.content_bounds();
+        l.check(ok && b.map_or(false, |b| b.w == w as i32 && b.h == h as i32), format!("Ctrl+V: картинка вставлена новым слоем {:?}", b.map(|b| (b.w, b.h))));
+        a.clipboard_copy(false);
+        let back = cb.get_image().ok().map(|i| (i.width, i.height));
+        l.check(back == Some((w, h)) && crate::platform::clipboard_is_ours(), format!("Ctrl+C: слой скопирован в системный буфер {back:?}"));
+        let n1 = a.ed.as_ref().map_or(0, |e| e.doc.layers.len());
+        a.clipboard_paste(None);
+        let ed = a.ed.as_mut().unwrap();
+        l.check(ed.doc.layers.len() == n1 + 1 && ed.doc.layer().name == "Вставка", "своя копия вставляется на то же место");
+        ed.layer_delete();
+        ed.layer_delete();
+        *CLIP_BACKUP.lock().unwrap() = Some((saved_img, saved_text));
+        // настоящее нажатие Ctrl+V: картинка 90×50 из «другой программы»
+        let mut px = vec![0u8; 90 * 50 * 4];
+        for p in px.chunks_exact_mut(4) { p.copy_from_slice(&[40, 160, 60, 255]); }
+        let _ = cb.set_image(arboard::ImageData { width: 90, height: 50, bytes: std::borrow::Cow::Owned(px) });
+        let n = a.ed.as_ref().map_or(0, |e| e.doc.layers.len());
+        N_BEFORE.store(n, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(windows)]
+        l.check(winkeys::press_ctrl_v(), "окну отправлено нажатие Ctrl+V");
+    }
+    let _ = (a, l);
+}
+
+static CLIP_BACKUP: std::sync::Mutex<Option<(Option<(usize, usize, Vec<u8>)>, Option<String>)>> = std::sync::Mutex::new(None);
+static N_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn clipboard_finish(a: &mut App, l: &mut AutoLog) {
+    #[cfg(windows)]
+    winkeys::release_ctrl();
+    #[cfg(windows)]
+    {
+        let ed = a.ed.as_mut().unwrap();
+        let n0 = N_BEFORE.load(std::sync::atomic::Ordering::Relaxed);
+        let b = ed.doc.layer().img.content_bounds();
+        let pasted = ed.doc.layers.len() == n0 + 1;
+        l.check(pasted && b.map_or(false, |b| b.w == 90 && b.h == 50), format!("клавиши Ctrl+V вставили картинку из буфера {:?}", b.map(|b| (b.w, b.h))));
+        if pasted { a.act("enter"); let ed = a.ed.as_mut().unwrap(); ed.layer_delete(); }
+    }
+    #[cfg(not(target_os = "android"))]
+    if let (Ok(mut cb), Some((img, text))) = (arboard::Clipboard::new(), CLIP_BACKUP.lock().unwrap().take()) {
+        match (img, text) {
+            (Some((w, h, bytes)), _) => { let _ = cb.set_image(arboard::ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(bytes) }); }
+            (None, Some(t)) => { let _ = cb.set_text(t); }
+            _ => { let _ = cb.clear(); }
+        }
+    }
+    let _ = (a, l);
+}
+
+/// Нажатие Ctrl+V только для своего окна: состояние Ctrl — в таблице клавиш своего потока,
+/// сообщение WM_KEYDOWN — в свою очередь сообщений. Другие программы не затрагиваются.
+#[cfg(windows)]
+mod winkeys {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetKeyboardState(s: *mut u8) -> i32;
+        fn SetKeyboardState(s: *const u8) -> i32;
+        fn PostMessageW(h: isize, msg: u32, w: usize, l: isize) -> i32;
+        fn EnumThreadWindows(tid: u32, f: unsafe extern "system" fn(isize, isize) -> i32, l: isize) -> i32;
+        fn IsWindowVisible(h: isize) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    unsafe extern "system" fn first_visible(h: isize, l: isize) -> i32 {
+        if IsWindowVisible(h) != 0 { *(l as *mut isize) = h; return 0; }
+        1
+    }
+    fn set_ctrl(down: bool) {
+        let mut st = [0u8; 256];
+        unsafe {
+            GetKeyboardState(st.as_mut_ptr());
+            for k in [0x11usize, 0xA2] { if down { st[k] |= 0x80; } else { st[k] &= 0x7f; } }
+            SetKeyboardState(st.as_ptr());
+        }
+    }
+    pub fn press_ctrl_v() -> bool {
+        let mut hwnd: isize = 0;
+        unsafe { EnumThreadWindows(GetCurrentThreadId(), first_visible, &mut hwnd as *mut isize as isize); }
+        if hwnd == 0 { return false; }
+        set_ctrl(true);
+        unsafe {
+            PostMessageW(hwnd, 0x0100, 0x56, 0x002F_0001);
+            PostMessageW(hwnd, 0x0101, 0x56, 0xC02F_0001u32 as i32 as isize);
+        }
+        true
+    }
+    pub fn release_ctrl() {
+        set_ctrl(false);
+    }
+}
+
+/// Импорт кисти Photoshop (.abr) и палитр (.gpl, .ase) так, как при выборе файлов.
+fn import_test(a: &mut App, l: &mut AutoLog) {
+    // ABR версии 2: одна кисть-отпечаток «кольцо» 48×48
+    let (w, h) = (48i32, 48i32);
+    let mut body = vec![];
+    body.extend(0u32.to_be_bytes());
+    body.extend(30u16.to_be_bytes());
+    let name: Vec<u16> = "Кольцо из ABR".encode_utf16().chain([0]).collect();
+    body.extend((name.len() as u32).to_be_bytes());
+    for c in name { body.extend(c.to_be_bytes()); }
+    body.push(1);
+    body.extend([0u8; 8]);
+    for v in [0, 0, h, w] { body.extend(v.to_be_bytes()); }
+    body.extend(8u16.to_be_bytes());
+    body.push(0);
+    for y in 0..h { for x in 0..w { let d = ((x as f32 - 23.5).powi(2) + (y as f32 - 23.5).powi(2)).sqrt(); body.push(if d > 14.0 && d < 22.0 { 255 } else { 0 }); } }
+    let mut abr = vec![0, 2, 0, 1, 0, 2];
+    abr.extend((body.len() as u32).to_be_bytes());
+    abr.extend(body);
+    let before = a.sh.brushes.custom.len();
+    a.handle_open(crate::app::Purpose::Brushes, vec![("Тест.abr".into(), abr)]);
+    let nb = a.sh.brushes.custom.last().cloned();
+    l.check(a.sh.brushes.custom.len() == before + 1 && nb.as_ref().map_or(false, |b| b.shape.starts_with("img:") && b.name == "Кольцо из ABR"), "импорт кисти Photoshop (.abr)");
+    if let Some(b) = nb {
+        let ed = a.ed.as_ref().unwrap();
+        let id = crate::editor::tool_state(&a.sh, ed.tool).brush_id.clone();
+        l.check(id == b.id, "импортированная кисть сразу выбрана");
+        let m = crate::brush::tip_mask(&b.shape);
+        l.check(m[256 * 512 + 256] < 0.05 && m.iter().any(|v| *v > 0.9), "форма отпечатка — кольцо с пустым центром");
+    }
+    let gpl = "GIMP Palette\nName: Море\n#\n10 40 90 Глубина\n40 120 200 Волна\n230 240 250 Пена\n".as_bytes().to_vec();
+    let ase = crate::palette::ase_write(&crate::state::Palette { name: "Закат".into(), colors: vec![[250, 120, 60], [200, 60, 90]], names: vec![] });
+    let np = a.sh.palettes.len();
+    a.handle_open(crate::app::Purpose::Palette, vec![("Море.gpl".into(), gpl), ("Закат.ase".into(), ase)]);
+    l.check(a.sh.palettes.len() == np + 2 && a.sh.palettes.iter().any(|p| p.name == "Море" && p.colors.len() == 3), "импорт палитр GIMP (.gpl) и Adobe (.ase)");
 }

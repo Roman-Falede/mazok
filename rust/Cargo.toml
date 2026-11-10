@@ -1,6 +1,6 @@
 [package]
 name = "mazok"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 description = "Мазок — приложение для цифрового рисования (Rust)"
 license = "MIT"
@@ -27,6 +27,7 @@ log = "0.4"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 rfd = "0.15"
+arboard = { version = "3.4", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }
@@ -34,6 +35,9 @@ winit = { version = "0.30", default-features = false, features = ["android-nativ
 android_logger = "0.14"
 jni = "0.21"
 ndk-context = "0.1"
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3

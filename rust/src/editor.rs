@@ -1,12 +1,13 @@
 //! Редактор: вид холста, ввод, инструменты, операции со слоями и выделением.
 
 use crate::blend::{self, Blend};
-use crate::brush::{self, Grain, Mirror,Sink, Stamp, Stroke, Tip};
+use crate::brush::{self, Brush, Grain, Mirror, Sink, Stamp, Stroke, Tip};
 use crate::doc::{self, Document, History, Layer, Op, TextSpec};
 use crate::filters;
 use crate::raster::{self, Affine, Img};
 use crate::state::{Shared, ToolState};
 use crate::util::{self, Rect};
+use crate::vector::{self, EraseMode, VStroke};
 use egui::{Color32, Pos2, Vec2};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -127,6 +128,7 @@ enum Active {
     Select { x0: f32, y0: f32, x1: f32, y1: f32, op: SelOp, pts: Vec<(f32, f32)>, start: Pos2, square: bool },
     Wand { src: Img, x: usize, y: usize, sx0: f32, base: f32, tol: f32, op: SelOp, preview: Option<(Vec<u8>, Rect)> },
     XDrag { h: Handle, p0: (f32, f32), snap: XState, anchor: (f32, f32), a0: f32 },
+    VErase { list: Vec<VStroke>, before: Option<vector::VList>, last: (f32, f32), r: f32, total: Option<Rect>, mode: EraseMode, changed: bool },
     Pan { last: Pos2 },
     Zoom { start: Pos2, last_x: f32, moved: bool, out: bool },
 }
@@ -235,9 +237,15 @@ pub(crate) fn tip_for(cache: &mut [Option<Arc<Tip>>; 7], shape: &str, hard: f32,
 }
 
 /// Обход пикселей отпечатка: f(x, y, покрытие).
-pub(crate) fn cover(tip: &Tip, s: &Stamp, round: f32, w: usize, h: usize, mut f: impl FnMut(usize, usize, f32)) {
+pub(crate) fn cover(tip: &Tip, s: &Stamp, round: f32, w: usize, h: usize, f: impl FnMut(usize, usize, f32)) {
+    cover_clip(tip, s, round, Rect::new(0, 0, w as i32, h as i32), f)
+}
+
+/// То же, но с отсечением по прямоугольнику clip (координаты холста).
+pub(crate) fn cover_clip(tip: &Tip, s: &Stamp, round: f32, clip: Rect, mut f: impl FnMut(usize, usize, f32)) {
     let rad = s.size * 0.75 + 1.5;
-    let Some(r) = Rect::around(s.x, s.y, rad).clip(w, h) else { return };
+    let Some(r) = Rect::around(s.x, s.y, rad).intersect(&clip) else { return };
+    if r.x < 0 || r.y < 0 { return; }
     let (cs, sn) = (s.angle.cos(), s.angle.sin());
     let scale = tip.size as f32 / s.size.max(0.01);
     let half = tip.size as f32 / 2.0;
@@ -262,7 +270,7 @@ pub(crate) fn cover(tip: &Tip, s: &Stamp, round: f32, w: usize, h: usize, mut f:
 }
 
 #[inline]
-fn over16(buf: &mut [u16], i: usize, col: [f32; 3], a: f32) {
+pub(crate) fn over16(buf: &mut [u16], i: usize, col: [f32; 3], a: f32) {
     let inv = 1.0 - a;
     let k = a * 65535.0;
     buf[i] = (buf[i] as f32 * inv + col[0] * k) as u16;
@@ -750,6 +758,15 @@ impl Editor {
             p.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(c[0], c[1], c[2]), egui::Stroke::NONE));
             p.circle_stroke(ctr, 44.0, egui::Stroke::new(4.0, Color32::from_gray(40)));
         }
+        if let Some(Active::Paint { stroke, .. }) = &self.active {
+            if let (Some(l), Some(h)) = (stroke.lazy_pos(), self.hover) {
+                // нить стабилизатора: от пера к кисти
+                let lp = v.to_screen(l.x, l.y);
+                p.line_segment([lp, h], egui::Stroke::new(1.0, Color32::from_white_alpha(170)));
+                p.circle_stroke(h, stroke.lazy_r * v.s, egui::Stroke::new(1.0, Color32::from_white_alpha(60)));
+                p.circle_filled(lp, 2.5, accent);
+            }
+        }
         if let Some(h) = self.hover {
             if sh.prefs.cursor && self.tool.is_paint() && self.active.is_none() && self.canvas_rect.contains(h) {
                 let ts = tool_state(sh, self.tool);
@@ -773,7 +790,16 @@ impl Editor {
                 if zoom != 1.0 {
                     self.view.zoom_at(hp, zoom);
                 } else if scroll.y != 0.0 && self.touches.is_empty() {
-                    self.view.zoom_at(hp, (scroll.y * 0.0022).exp());
+                    if mods.alt && self.tool.is_paint() {
+                        // Alt + колесо — размер кисти
+                        let ts = self.tool_state_mut(sh);
+                        ts.size = (ts.size + scroll.y.signum() * 0.02).clamp(0.0, 1.0);
+                        let (id, sz) = (ts.brush_id.clone(), ts.size);
+                        let px = brush::size_px(sh.brushes.get(&id), sz);
+                        self.toast(&format!("Размер: {px:.1} px"));
+                    } else {
+                        self.view.zoom_at(hp, (scroll.y * 0.0022).exp());
+                    }
                 }
             }
         }
@@ -918,7 +944,7 @@ impl Editor {
             Tool::Fill => self.fill_begin(x, y, pos.x, sh),
             Tool::Picker => { self.active = Some(Active::Pick); self.pick_preview(pos, sh); }
             Tool::Gradient | Tool::Shapes => {
-                if !self.check_layer() { return; }
+                if !self.check_layer() || !self.raster_only() { return; }
                 self.begin_work();
                 self.active = Some(if self.tool == Tool::Gradient {
                     Active::Gradient { x0: x, y0: y, x1: x, y1: y, moved: false, start: pos, pending: false }
@@ -1006,6 +1032,7 @@ impl Editor {
                 if t != *tol { *tol = t; self.wand_compute(); }
             }
             Some(Active::XDrag { .. }) => self.xform_move(x, y, mods.shift),
+            Some(Active::VErase { .. }) => self.verase_to(x, y),
             Some(Active::Pan { last }) => {
                 let d = pos - *last;
                 *last = pos;
@@ -1068,6 +1095,7 @@ impl Editor {
                 if let Some((m, _)) = preview { self.apply_selection(m, op, None, "Волшебная палочка"); }
             }
             Active::XDrag { .. } => {}
+            Active::VErase { before, list, total, changed, .. } => self.verase_commit(before, list, total, changed),
             Active::Pan { .. } => {}
             Active::Zoom { start, moved, out, .. } => { if !moved { self.view.zoom_at(start, if out { 0.5 } else { 2.0 }); } }
         }
@@ -1078,6 +1106,7 @@ impl Editor {
             match a {
                 Active::Paint { total, .. } => { self.work = None; if let Some(t) = total { self.invalidate(t); } }
                 Active::Fill { .. } | Active::Gradient { .. } | Active::Shape { .. } => { self.work = None; self.invalidate_all(); }
+                Active::VErase { total, .. } => { self.work = None; if let Some(t) = total { self.invalidate(t); } }
                 _ => {}
             }
         }
@@ -1144,15 +1173,29 @@ impl Editor {
 
     fn paint_begin(&mut self, mode: PaintMode, x: f32, y: f32, pressure: f32, pos: Pos2, sh: &mut Shared) {
         if !self.check_layer() { return; }
+        let is_vec = self.doc.layer().is_vector();
+        if is_vec && matches!(mode, PaintMode::Smudge | PaintMode::Clone) {
+            self.toast("На векторном слое работают кисть и ластик. Для этого инструмента растеризуйте слой");
+            return;
+        }
         let tool = self.tool;
         let ts = tool_state(sh, tool).clone();
         let b = sh.brushes.get(&ts.brush_id).clone();
         let size = brush::size_px(&b, ts.size);
         self.begin_work();
+        if is_vec && mode == PaintMode::Erase {
+            let before = self.doc.layer().vector.clone();
+            let list = before.as_ref().map(|v| (**v).clone()).unwrap_or_default();
+            let r = (size / 2.0).max(1.0);
+            let emode = EraseMode::from_id(&sh.prefs.vector_erase);
+            self.active = Some(Active::VErase { list, before, last: (x, y), r, total: None, mode: emode, changed: false });
+            self.verase_to(x, y);
+            return;
+        }
         let n = self.doc.w * self.doc.h * 4;
         if self.buffer.len() != n { self.buffer = vec![0; n]; } else { self.buffer.fill(0); }
         let grain = b.grain.as_ref().filter(|_| b.grain_strength > 0.0).map(|g| (brush::grain(g), b.grain_scale, b.grain_strength));
-        let blend = if tool == Tool::Brush && ts.mode != "source-over" { Blend::from_id(&ts.mode) } else { b.blend.as_deref().map(Blend::from_id).unwrap_or(Blend::Normal) };
+        let blend = if is_vec { Blend::Normal } else if tool == Tool::Brush && ts.mode != "source-over" { Blend::from_id(&ts.mode) } else { b.blend.as_deref().map(Blend::from_id).unwrap_or(Blend::Normal) };
         let mut clone_off = (0.0, 0.0);
         let mut clone_src = None;
         if mode == PaintMode::Clone {
@@ -1161,7 +1204,10 @@ impl Editor {
             clone_off = self.clone_off.unwrap();
             clone_src = Some(self.doc.layer().img.clone());
         }
-        let stroke = Stroke::new(b, size, sh.colors.fg, self.mirrors(), sh.prefs.pressure_gamma, sh.prefs.streamline_mul);
+        let mut stroke = Stroke::new(b, size, sh.colors.fg, self.mirrors(), sh.prefs.pressure_gamma, sh.prefs.streamline_mul);
+        if mode != PaintMode::Smudge {
+            stroke.lazy_r = sh.prefs.stabilizer.clamp(0.0, 1.0) * 70.0 / self.view.s.max(0.01);
+        }
         self.active = Some(Active::Paint {
             mode, stroke, total: None, opacity: ts.opacity, grain, blend, start: pos, start_t: self.now, started: false, shape: None,
             qs_anchor: pos, qs_t: self.now, picks: vec![], clone_src, clone_off,
@@ -1239,9 +1285,14 @@ impl Editor {
             Some(Active::Paint { stroke, shape, mode, .. }) => (stroke.b.taper_end > 0.0 && stroke.pts.len() > 1, shape.is_some(), *mode),
             _ => return,
         };
+        let post = sh.prefs.post_smooth;
         if !has_shape {
-            if needs_taper && matches!(mode, PaintMode::Paint | PaintMode::Erase) {
+            let smooth = post > 0.0 && matches!(mode, PaintMode::Paint | PaintMode::Erase);
+            if (needs_taper || smooth) && matches!(mode, PaintMode::Paint | PaintMode::Erase) {
                 self.paint_feed(|s, sink| s.catch_up(sink));
+                if smooth {
+                    if let Some(Active::Paint { stroke, .. }) = &mut self.active { brush::smooth_points(&mut stroke.pts, post); }
+                }
                 self.paint_rerender();
             } else {
                 self.paint_feed(|s, sink| s.end(sink));
@@ -1249,7 +1300,16 @@ impl Editor {
         }
         self.flush_active(sh);
         let name = match mode { PaintMode::Paint => "Мазок кистью", PaintMode::Erase => "Стирание", PaintMode::Smudge => "Растушёвка пальцем", PaintMode::Clone => "Клонирование" };
-        let total = match self.active.take() { Some(Active::Paint { total, .. }) => total, _ => None };
+        let (total, stroke, opacity) = match self.active.take() { Some(Active::Paint { total, stroke, opacity, .. }) => (total, Some(stroke), opacity), _ => (None, None, 1.0) };
+        let wl = self.work.as_ref().map(|w| w.layer);
+        if let (Some(li), Some(st), PaintMode::Paint) = (wl, stroke, mode) {
+            if self.doc.layers.get(li).map_or(false, |l| l.is_vector()) {
+                self.vector_add_stroke(li, st, opacity, total, sh.colors.fg);
+                self.doc.strokes += 1;
+                sh.colors.used();
+                return;
+            }
+        }
         if let Some(t) = total {
             self.commit_rect(t, name);
             self.doc.strokes += 1;
@@ -1260,15 +1320,120 @@ impl Editor {
         }
     }
 
+    /* ---------- векторные слои ---------- */
+
+    /// Продолжить движение векторного ластика до точки (x, y).
+    fn verase_to(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.doc.w, self.doc.h);
+        let Editor { active, work, .. } = self;
+        let Some(Active::VErase { list, last, r, total, mode, changed, .. }) = active else { return };
+        let dirty = vector::erase(list, *last, (x, y), *r, *mode);
+        *last = (x, y);
+        let Some(d) = dirty.and_then(|d| d.clip(w, h)) else { return };
+        *changed = true;
+        *total = util::union_opt(*total, d);
+        if let Some(work) = work { vector::render(&mut work.img, list, d); }
+        self.invalidate(d);
+    }
+
+    fn verase_commit(&mut self, before: Option<vector::VList>, list: Vec<VStroke>, total: Option<Rect>, changed: bool) {
+        let li = self.work.as_ref().map_or(self.doc.active, |w| w.layer);
+        if !changed || li >= self.doc.layers.len() { self.work = None; return; }
+        let id = self.doc.layers[li].id.clone();
+        let after = Some(Arc::new(list));
+        self.hist.begin_group();
+        match total { Some(t) => self.commit_rect(t, "Векторный ластик"), None => self.work = None }
+        self.doc.layers[li].vector = after.clone();
+        self.hist.push("Векторный ластик", Op::Vector { layer: id, before, after });
+        self.hist.end_group("Векторный ластик");
+        self.mark_changed();
+    }
+
+    /// Записать законченный штрих в векторный слой (с копиями по симметрии).
+    fn vector_add_stroke(&mut self, li: usize, st: Stroke, opacity: f32, total: Option<Rect>, color: [u8; 3]) {
+        if st.pts.is_empty() { self.work = None; self.invalidate_all(); return; }
+        let base = VStroke { pts: st.pts.clone(), brush: Arc::new(Brush { streamline: 0.0, ..st.b.clone() }), size: st.base, color, opacity, seed: st.seed(), gamma: st.gamma };
+        let mut new = vec![];
+        if st.mirrors.is_empty() {
+            new.push(base);
+        } else {
+            for m in &st.mirrors {
+                let aff = Affine { a: m.a, c: m.b, b: m.c, d: m.d, e: m.cx - m.a * m.cx - m.b * m.cy, f: m.cy - m.c * m.cx - m.d * m.cy };
+                new.extend(vector::transform(std::slice::from_ref(&base), aff));
+            }
+        }
+        let before = self.doc.layers[li].vector.clone();
+        let mut list = before.as_ref().map(|v| (**v).clone()).unwrap_or_default();
+        let mut rect = total;
+        for v in &new { rect = util::union_opt(rect, v.bbox()); }
+        list.extend(new);
+        let Some(r) = rect.and_then(|r| r.clip(self.doc.w, self.doc.h)) else { self.work = None; return };
+        if let Some(work) = &mut self.work { vector::render(&mut work.img, &list, r); }
+        let id = self.doc.layers[li].id.clone();
+        self.hist.begin_group();
+        self.commit_rect(r, "Векторная линия");
+        let after = Some(Arc::new(list));
+        self.doc.layers[li].vector = after.clone();
+        self.hist.push("Векторная линия", Op::Vector { layer: id, before, after });
+        self.hist.end_group("Векторная линия");
+    }
+
+    /// Заменить штрихи активного векторного слоя и перерисовать его.
+    fn vector_replace(&mut self, name: &str, f: impl FnOnce(&[VStroke]) -> Vec<VStroke>) {
+        let li = self.doc.active;
+        let Some(before) = self.doc.layers[li].vector.clone() else { return };
+        let list = f(&before);
+        let img = vector::render_full(self.doc.w, self.doc.h, &list);
+        self.work = Some(Work { layer: li, img });
+        let id = self.doc.layers[li].id.clone();
+        self.hist.begin_group();
+        self.commit_work(name);
+        let after = Some(Arc::new(list));
+        self.doc.layers[li].vector = after.clone();
+        self.hist.push(name, Op::Vector { layer: id, before: Some(before), after });
+        self.hist.end_group(name);
+    }
+
+    pub fn layer_add_vector(&mut self) {
+        self.commit_pending();
+        let n = self.doc.next_name().replace("Слой", "Вектор");
+        let mut l = Layer::new(self.doc.w, self.doc.h, &n);
+        l.vector = Some(Arc::new(vec![]));
+        let at = self.doc.active + 1;
+        self.layer_insert(l, at, "Новый векторный слой");
+        self.toast("Векторный слой: линии можно стирать до пересечения и масштабировать без потерь");
+    }
+
+    pub fn layer_rasterize(&mut self) {
+        self.commit_pending();
+        let li = self.doc.active;
+        let l = &mut self.doc.layers[li];
+        let Some(before) = l.vector.take() else { return };
+        l.ver += 1;
+        let id = l.id.clone();
+        self.hist.push("Растеризовать слой", Op::Vector { layer: id, before: Some(before), after: None });
+        self.mark_changed();
+    }
+
+    /// Проверка для инструментов, которые работают только с пикселями.
+    fn raster_only(&mut self) -> bool {
+        if self.doc.layer().is_vector() {
+            self.toast("Это векторный слой. Растеризуйте его (Слои → Растеризовать) или выберите обычный слой");
+            return false;
+        }
+        true
+    }
+
     /// Перенос буфера штриха в рабочую копию слоя.
     fn apply_buffer(&mut self, r: Rect, mode: PaintMode, opacity: f32, grain: Option<&(Arc<Grain>, f32, f32)>, blend: Blend) {
         let Some(work) = &mut self.work else { return };
         let layer = &self.doc.layers[work.layer];
         let src = &layer.img;
-        let alpha_lock = layer.alpha_lock;
+        let is_vec = layer.is_vector();
+        let alpha_lock = layer.alpha_lock && !is_vec;
         let w = self.doc.w;
         let buf = &self.buffer;
-        let sel = self.sel.as_deref();
+        let sel = if is_vec { None } else { self.sel.as_deref() };
         work.img.px.par_chunks_mut(w * 4).enumerate().skip(r.y as usize).take(r.h as usize).for_each(|(y, row)| {
             for x in r.x as usize..r.right() as usize {
                 let i = (y * w + x) * 4;
@@ -1378,7 +1543,7 @@ impl Editor {
 
     fn fill_begin(&mut self, x: f32, y: f32, sx: f32, sh: &Shared) {
         if x < 0.0 || y < 0.0 || x >= self.doc.w as f32 || y >= self.doc.h as f32 { return; }
-        if !self.check_layer() { return; }
+        if !self.check_layer() || !self.raster_only() { return; }
         let src = if sh.prefs.fill_all_layers { doc::flatten(&self.doc, false) } else { (*self.doc.layer().img).clone() };
         self.begin_work();
         self.active = Some(Active::Fill { src, x: x as usize, y: y as usize, sx0: sx, base: sh.prefs.fill_tol, tol: sh.prefs.fill_tol, color: sh.colors.fg, prev: None, total: None, pending: true });
@@ -1661,15 +1826,16 @@ impl Editor {
         if !self.check_layer() { return false; }
         let li = self.doc.active;
         let orig = self.doc.layers[li].img.clone();
-        let bounds = match &self.sel { Some(_) => self.sel_bounds(), None => orig.content_bounds() };
+        let use_sel = self.sel.is_some() && !self.doc.layers[li].is_vector();
+        let bounds = if use_sel { self.sel_bounds() } else { orig.content_bounds() };
         let Some(b) = bounds else {
-            self.toast(if self.sel.is_some() { "Выделение пустое" } else { "На слое нечего трансформировать" });
+            self.toast(if use_sel { "Выделение пустое" } else { "На слое нечего трансформировать" });
             return false;
         };
         let mut float = orig.crop(b);
         let mut hole = (*orig).clone();
         let mut mask_crop = None;
-        if let Some(m) = &self.sel {
+        if let Some(m) = self.sel.as_ref().filter(|_| use_sel) {
             let w = self.doc.w;
             for y in 0..b.h as usize {
                 for x in 0..b.w as usize {
@@ -1812,6 +1978,21 @@ impl Editor {
         self.active = None;
         if !x.changed { self.work = None; self.invalidate_all(); return; }
         let m = Self::xform_matrix(&x);
+        if let Some(list) = self.doc.layers.get(x.layer).and_then(|l| l.vector.clone()) {
+            // Векторный слой: преобразуем сами линии — без потери качества.
+            let (bx, by) = (x.init.cx - x.init.w / 2.0, x.init.cy - x.init.h / 2.0);
+            let md = Affine { e: m.e - (m.a * bx + m.c * by), f: m.f - (m.b * bx + m.d * by), ..m };
+            let nl = vector::transform(&list, md);
+            self.work = Some(Work { layer: x.layer, img: vector::render_full(self.doc.w, self.doc.h, &nl) });
+            let id = self.doc.layers[x.layer].id.clone();
+            self.hist.begin_group();
+            self.commit_work("Трансформация");
+            let after = Some(Arc::new(nl));
+            self.doc.layers[x.layer].vector = after.clone();
+            self.hist.push("Трансформация", Op::Vector { layer: id, before: Some(list), after });
+            self.hist.end_group("Трансформация");
+            return;
+        }
         self.hist.begin_group();
         self.commit_work("Трансформация");
         if let Some(mc) = &x.mask {
@@ -1839,7 +2020,7 @@ impl Editor {
 
     pub fn filter_open(&mut self, id: &'static str) {
         self.commit_pending();
-        if !self.check_layer() { return; }
+        if !self.check_layer() || !self.raster_only() { return; }
         let f = filters::find(id);
         let li = self.doc.active;
         self.filter = Some(FilterSession { id: f.id, params: filters::defaults(f), layer: li, src: self.doc.layers[li].img.clone(), dirty: true });
@@ -2014,6 +2195,16 @@ impl Editor {
     }
     pub fn layer_clear(&mut self) {
         self.commit_pending();
+        if self.doc.layer().is_vector() {
+            if self.doc.layer().locked { self.toast("Слой заблокирован"); return; }
+            let (w, h) = (self.doc.w, self.doc.h);
+            let sel = self.sel.clone();
+            self.vector_replace("Очистить", |l| match &sel {
+                Some(m) => { let hit = vector::touched_by_mask(l, m, w, h); l.iter().zip(hit).filter(|(_, t)| !*t).map(|(s, _)| s.clone()).collect() }
+                None => vec![],
+            });
+            return;
+        }
         self.layer_pixels("Очистить", |img, sel| match sel {
             Some(m) => for (i, v) in m.iter().enumerate() { let k = 1.0 - *v as f32 / 255.0; for c in 0..4 { img.px[i * 4 + c] = (img.px[i * 4 + c] as f32 * k).round() as u8; } },
             None => img.clear(),
@@ -2021,6 +2212,7 @@ impl Editor {
     }
     pub fn layer_fill(&mut self, col: [u8; 3]) {
         self.commit_pending();
+        if !self.raster_only() { return; }
         let alpha_lock = self.doc.layer().alpha_lock;
         self.layer_pixels("Залить", |img, sel| {
             for i in 0..img.w * img.h {
@@ -2039,6 +2231,12 @@ impl Editor {
     }
     pub fn layer_flip(&mut self, horiz: bool) {
         self.commit_pending();
+        if self.doc.layer().is_vector() {
+            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+            let m = if horiz { Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w, f: 0.0 } } else { Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h } };
+            self.vector_replace("Отразить слой", |l| vector::transform(l, m));
+            return;
+        }
         self.layer_pixels("Отразить слой", |img, _| img.flip(horiz));
     }
     pub fn merge_down(&mut self) {
@@ -2061,6 +2259,17 @@ impl Editor {
         }
         self.hist.begin_group();
         let id = self.doc.layers[li].id.clone();
+        let lower_vec = self.doc.layers[li].vector.clone();
+        if let Some(lv) = lower_vec {
+            let simple = up.blend == Blend::Normal && !up.clip && (up.opacity - 1.0).abs() < 1e-3;
+            let nv = match (&up.vector, up.visible) {
+                (Some(uv), true) if simple => { let mut v = (*lv).clone(); v.extend(uv.iter().cloned()); Some(Arc::new(v)) }
+                (_, false) => Some(lv.clone()),
+                _ => None,
+            };
+            self.doc.layers[li].vector = nv.clone();
+            self.hist.push("Объединить", Op::Vector { layer: id.clone(), before: Some(lv), after: nv });
+        }
         self.doc.layers[li].img = Arc::new(merged.clone());
         self.doc.layers[li].ver += 1;
         self.hist.push("Объединить", Op::Pixels { layer: id, x: 0, y: 0, before, after: merged });
@@ -2090,23 +2299,36 @@ impl Editor {
         self.doc.active = 0;
         self.replace_layers(vec![l], w, h, "Свести изображение");
     }
-    pub fn canvas_op(&mut self, name: &str, nw: usize, nh: usize, f: impl Fn(&Img) -> Img) {
+    pub fn canvas_op(&mut self, name: &str, nw: usize, nh: usize, aff: Affine, f: impl Fn(&Img) -> Img) {
         self.commit_pending();
-        let layers: Vec<Layer> = self.doc.layers.iter().map(|l| { let mut n = l.clone(); n.img = Arc::new(f(&l.img)); n.ver += 1; n }).collect();
+        let layers: Vec<Layer> = self.doc.layers.iter().map(|l| {
+            let mut n = l.clone();
+            match &l.vector {
+                Some(v) => { let nv = vector::transform(v, aff); n.img = Arc::new(vector::render_full(nw, nh, &nv)); n.vector = Some(Arc::new(nv)); }
+                None => n.img = Arc::new(f(&l.img)),
+            }
+            n.ver += 1;
+            n
+        }).collect();
         self.replace_layers(layers, nw, nh, name);
     }
     pub fn resize_canvas(&mut self, nw: usize, nh: usize, ox: i32, oy: i32, scale: bool) {
-        self.canvas_op(if scale { "Размер изображения" } else { "Размер холста" }, nw, nh, |img| {
+        let (ow, oh) = (self.doc.w as f32, self.doc.h as f32);
+        let aff = if scale { Affine { a: nw as f32 / ow, b: 0.0, c: 0.0, d: nh as f32 / oh, e: 0.0, f: 0.0 } } else { Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: ox as f32, f: oy as f32 } };
+        self.canvas_op(if scale { "Размер изображения" } else { "Размер холста" }, nw, nh, aff, |img| {
             if scale { img.resize(nw, nh) } else { let mut o = Img::new(nw, nh); o.put(ox, oy, img); o }
         });
     }
     pub fn rotate_canvas(&mut self, cw: bool) {
         let (w, h) = (self.doc.h, self.doc.w);
-        self.canvas_op("Повернуть холст", w, h, |img| img.rotate90(cw));
+        let (ow, oh) = (self.doc.w as f32, self.doc.h as f32);
+        let aff = if cw { Affine { a: 0.0, b: 1.0, c: -1.0, d: 0.0, e: oh, f: 0.0 } } else { Affine { a: 0.0, b: -1.0, c: 1.0, d: 0.0, e: 0.0, f: ow } };
+        self.canvas_op("Повернуть холст", w, h, aff, |img| img.rotate90(cw));
     }
     pub fn flip_canvas(&mut self, horiz: bool) {
         let (w, h) = (self.doc.w, self.doc.h);
-        self.canvas_op("Отразить холст", w, h, |img| { let mut o = img.clone(); o.flip(horiz); o });
+        let aff = if horiz { Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w as f32, f: 0.0 } } else { Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h as f32 } };
+        self.canvas_op("Отразить холст", w, h, aff, |img| { let mut o = img.clone(); o.flip(horiz); o });
     }
     pub fn set_bg(&mut self, c: [u8; 3], vis: bool) {
         let old = (self.doc.bg, self.doc.bg_visible);
@@ -2202,15 +2424,12 @@ impl Editor {
             if cmd {
                 if k(Key::Z) { action = Some(if shift { "redo" } else { "undo" }); }
                 if k(Key::Y) { action = Some("redo"); }
-                if k(Key::S) { action = Some("save"); }
+                if k(Key::S) { action = Some(if shift { "save_as" } else { "save" }); }
                 if k(Key::N) { action = Some(if shift { "layer_new" } else { "new" }); }
                 if k(Key::O) { action = Some("open"); }
                 if k(Key::A) { action = Some("sel_all"); }
                 if k(Key::D) { action = Some("sel_none"); }
                 if k(Key::I) && shift { action = Some("sel_invert"); }
-                if k(Key::C) { action = Some(if shift { "copy_merged" } else { "copy" }); }
-                if k(Key::X) { action = Some("cut"); }
-                if k(Key::V) { action = Some("paste"); }
                 if k(Key::J) { action = Some(if shift { "cut_layer" } else { "dup_or_copy" }); }
                 if k(Key::E) { action = Some(if shift { "flatten" } else { "merge" }); }
                 if k(Key::T) { action = Some("transform"); }
@@ -2236,6 +2455,9 @@ impl Editor {
             if k(Key::Enter) { action = Some("enter"); }
             if k(Key::Escape) { action = Some("escape"); }
             if k(Key::Tab) { action = Some("toggle_ui"); }
+            // 1…9, 0 — непрозрачность 10…100 %
+            const OPS: [(egui::Key, &str); 10] = [(Key::Num1, "opacity_1"), (Key::Num2, "opacity_2"), (Key::Num3, "opacity_3"), (Key::Num4, "opacity_4"), (Key::Num5, "opacity_5"), (Key::Num6, "opacity_6"), (Key::Num7, "opacity_7"), (Key::Num8, "opacity_8"), (Key::Num9, "opacity_9"), (Key::Num0, "opacity_10")];
+            for (key, a) in OPS { if k(key) { action = Some(a); } }
         });
         let _ = sh;
         action

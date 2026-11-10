@@ -54,6 +54,8 @@ pub struct Layer {
     pub locked: bool,
     pub reference: bool,
     pub text: Option<TextSpec>,
+    /// Векторные штрихи (векторный слой); пиксели в img — их отрисовка.
+    pub vector: Option<crate::vector::VList>,
     pub ver: u64,
 }
 
@@ -71,8 +73,12 @@ impl Layer {
             locked: false,
             reference: false,
             text: None,
+            vector: None,
             ver: 1,
         }
+    }
+    pub fn is_vector(&self) -> bool {
+        self.vector.is_some()
     }
     pub fn img_mut(&mut self) -> &mut Img {
         self.ver += 1;
@@ -270,6 +276,8 @@ pub enum Op {
     Pixels { layer: String, x: i32, y: i32, before: Img, after: Img },
     Props { layer: String, before: Props, after: Props },
     Text { layer: String, before: Option<TextSpec>, after: Option<TextSpec> },
+    /// Смена векторных данных слоя (пиксели меняются отдельной операцией).
+    Vector { layer: String, before: Option<crate::vector::VList>, after: Option<crate::vector::VList> },
     Insert { index: usize, layer: Option<Layer>, prev_active: usize },
     Remove { index: usize, layer: Option<Layer>, prev_active: usize },
     Move { from: usize, to: usize },
@@ -306,6 +314,7 @@ fn op_bytes(op: &Op) -> usize {
         Op::Sel { other } => other.as_ref().map_or(0, |v| v.len()),
         Op::Insert { layer, .. } | Op::Remove { layer, .. } => layer.as_ref().map_or(0, |l| l.img.px.len()),
         Op::Group(v) => v.iter().map(op_bytes).sum(),
+        Op::Vector { before, after, .. } => [before, after].iter().map(|v| v.as_ref().map_or(0, |v| v.iter().map(|s| s.pts.len() * 16 + 64).sum::<usize>())).sum(),
         _ => 64,
     }
 }
@@ -388,6 +397,12 @@ fn apply(op: &mut Op, doc: &mut Document, sel: &mut Option<Vec<u8>>, undo: bool)
         Op::Text { layer, before, after } => {
             if let Some(i) = doc.find(layer) {
                 doc.layers[i].text = if undo { before.clone() } else { after.clone() };
+            }
+        }
+        Op::Vector { layer, before, after } => {
+            if let Some(i) = doc.find(layer) {
+                doc.layers[i].vector = if undo { before.clone() } else { after.clone() };
+                doc.layers[i].ver += 1;
             }
         }
         Op::Insert { index, layer, prev_active } => {

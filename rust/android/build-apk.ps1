@@ -4,8 +4,8 @@
 param(
   [string]$Sdk = $env:ANDROID_HOME,
   [string]$Ndk = '',
-  [string]$VersionName = '3.0.0',
-  [int]$VersionCode = 3,
+  [string]$VersionName = '3.1.0',
+  [int]$VersionCode = 4,
   [switch]$SkipCargo
 )
 $ErrorActionPreference = 'Stop'
@@ -15,10 +15,10 @@ $root = (Resolve-Path (Join-Path $here '..\..')).Path
 if (-not $Sdk -or -not (Test-Path $Sdk)) { throw 'Укажите папку Android SDK: -Sdk <путь> или переменную ANDROID_HOME' }
 if (-not $Ndk) { $Ndk = (Get-ChildItem (Join-Path $Sdk 'ndk') -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName }
 $bt = (Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
-$aapt2 = Join-Path $bt 'aapt2.exe'; $zipalign = Join-Path $bt 'zipalign.exe'; $apksigner = Join-Path $bt 'apksigner.bat'
+$aapt2 = Join-Path $bt 'aapt2.exe'; $zipalign = Join-Path $bt 'zipalign.exe'; $apksigner = Join-Path $bt 'apksigner.bat'; $d8 = Join-Path $bt 'd8.bat'
 $jar = Join-Path $Sdk 'platforms\android-35\android.jar'
 $llvm = Join-Path $Ndk 'toolchains\llvm\prebuilt\windows-x86_64\bin'
-foreach ($p in $aapt2, $zipalign, $apksigner, $jar, $llvm) { if (-not (Test-Path $p)) { throw "Не найден $p" } }
+foreach ($p in $aapt2, $zipalign, $apksigner, $d8, $jar, $llvm) { if (-not (Test-Path $p)) { throw "Не найден $p" } }
 # Инструменты пишут ход работы в stderr — в Windows PowerShell 5.1 это не должно считаться ошибкой
 function Run($exe, [string[]]$a) {
   $ErrorActionPreference = 'Continue'
@@ -76,8 +76,14 @@ try {
   Run $aapt2 @('link', '-o', (Join-Path $tmp 'base.apk'), '-I', (Join-Path $tmp 'android.jar'), '--manifest', (Join-Path $tmp 'AndroidManifest.xml'),
     '--min-sdk-version', '26', '--target-sdk-version', '34', '--version-code', "$VersionCode", '--version-name', $VersionName,
     '--auto-add-overlay', (Join-Path $tmp 'res.zip'))
-  # 4. Добавляем библиотеку, выравниваем по страницам 16 КБ, подписываем
-  Run 'java' @((Join-Path $here 'ApkAdd.java'), (Join-Path $tmp 'base.apk'), (Join-Path $tmp 'unsigned.apk'), ('lib/arm64-v8a/libmazok.so=' + (Join-Path $tmp 'libmazok.so')))
+  # 4. Java-часть (выбор файлов и папок, буфер обмена) → classes.dex
+  $cls = Join-Path $tmp 'classes'; New-Item -ItemType Directory $cls | Out-Null
+  Copy-Item (Join-Path $here 'MazokActivity.java') (Join-Path $tmp 'MazokActivity.java')
+  Run 'javac' @('--release', '11', '-encoding', 'UTF-8', '-nowarn', '-classpath', (Join-Path $tmp 'android.jar'), '-d', $cls, (Join-Path $tmp 'MazokActivity.java'))
+  $classFiles = @(Get-ChildItem $cls -Recurse -Filter *.class | ForEach-Object { $_.FullName })
+  Run $d8 (@('--release', '--min-api', '26', '--lib', (Join-Path $tmp 'android.jar'), '--output', $tmp) + $classFiles)
+  # 5. Добавляем библиотеку и код, выравниваем по страницам 16 КБ, подписываем
+  Run 'java' @((Join-Path $here 'ApkAdd.java'), (Join-Path $tmp 'base.apk'), (Join-Path $tmp 'unsigned.apk'), ('lib/arm64-v8a/libmazok.so=' + (Join-Path $tmp 'libmazok.so')), ('classes.dex=' + (Join-Path $tmp 'classes.dex')))
   Run $zipalign @('-P', '16', '-f', '4', (Join-Path $tmp 'unsigned.apk'), (Join-Path $tmp 'aligned.apk'))
   $ks = Join-Path $root 'build\android\mazok-release.keystore'; $kp = Join-Path $root 'build\android\keystore.password'
   if (-not (Test-Path $ks)) {

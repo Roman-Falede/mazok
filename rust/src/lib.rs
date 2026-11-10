@@ -4,15 +4,19 @@ pub mod app;
 pub mod autotest;
 pub mod blend;
 pub mod brush;
+pub mod brushio;
 pub mod doc;
 pub mod editor;
 pub mod filters;
 pub mod formats;
+pub mod palette;
 pub mod platform;
 pub mod raster;
+pub mod sqlite;
 pub mod state;
 pub mod ui;
 pub mod util;
+pub mod vector;
 
 use std::path::PathBuf;
 
@@ -42,7 +46,7 @@ pub fn desktop_data_dir() -> PathBuf {
 pub fn run_desktop() {
     let dir = desktop_data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let opts = eframe::NativeOptions { viewport: viewport(), vsync: true, multisampling: 0, ..Default::default() };
+    let opts = eframe::NativeOptions { viewport: viewport().with_drag_and_drop(true), vsync: true, multisampling: 0, ..Default::default() };
     let res = eframe::run_native("Мазок", opts, Box::new(move |cc| Ok(Box::new(app::App::new(cc, dir)))));
     if let Err(e) = res {
         let msg = format!("Не удалось запустить Мазок: {e}\n\nНужна видеокарта с поддержкой OpenGL 3.");

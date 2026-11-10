@@ -59,6 +59,16 @@ impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x as f32 && y >= self.y as f32 && x < self.right() as f32 && y < self.bottom() as f32
     }
+    pub fn intersect(&self, o: &Rect) -> Option<Rect> {
+        let x0 = self.x.max(o.x);
+        let y0 = self.y.max(o.y);
+        let x1 = self.right().min(o.right());
+        let y1 = self.bottom().min(o.bottom());
+        if x1 > x0 && y1 > y0 { Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }) } else { None }
+    }
+    pub fn overlaps(&self, o: &Rect) -> bool {
+        self.intersect(o).is_some()
+    }
 }
 
 pub fn union_opt(a: Option<Rect>, b: Rect) -> Option<Rect> {

@@ -62,10 +62,140 @@ impl Default for Brush {
     }
 }
 
-pub const CATS: [(&str, &str); 9] = [
+pub const CATS: [(&str, &str); 10] = [
     ("sketch", "Эскиз"), ("ink", "Тушь"), ("paint", "Живопись"), ("air", "Аэрограф"), ("texture", "Текстура"),
-    ("nature", "Природа"), ("fx", "Декор"), ("pixel", "Пиксель"), ("custom", "Мои кисти"),
+    ("nature", "Природа"), ("fx", "Декор"), ("pixel", "Пиксель"), ("custom", "Мои кисти"), ("imported", "Импорт"),
 ];
+
+/* ---------- свои формы отпечатка и текстуры из картинок ---------- */
+
+static ASSETS_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Папка, где хранятся формы отпечатка (tips/) и текстуры (grains/) из картинок.
+pub fn set_assets_dir(p: std::path::PathBuf) {
+    let _ = std::fs::create_dir_all(p.join("tips"));
+    let _ = std::fs::create_dir_all(p.join("grains"));
+    let _ = ASSETS_DIR.set(p);
+}
+
+fn image_store() -> &'static Mutex<HashMap<String, Arc<Vec<f32>>>> {
+    static C: OnceLock<Mutex<HashMap<String, Arc<Vec<f32>>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Загрузить маску (size×size) из реестра или с диска.
+fn stored_mask(kind: &str, id: &str, size: usize) -> Option<Arc<Vec<f32>>> {
+    let key = format!("{kind}/{id}");
+    if let Some(m) = image_store().lock().unwrap().get(&key) {
+        return Some(m.clone());
+    }
+    let path = ASSETS_DIR.get()?.join(kind).join(format!("{id}.png"));
+    let img = crate::formats::decode_image(&std::fs::read(path).ok()?).ok()?;
+    let img = if img.w != size || img.h != size { img.resize(size, size) } else { img };
+    let m: Vec<f32> = img.px.chunks_exact(4).map(|p| p[3] as f32 / 255.0).collect();
+    let m = Arc::new(m);
+    image_store().lock().unwrap().insert(key, m.clone());
+    Some(m)
+}
+
+/// Сохранить маску как PNG (белый цвет, маска в альфа-канале) и зарегистрировать.
+fn store_mask(kind: &str, id: &str, size: usize, m: Vec<f32>) {
+    let mut img = crate::raster::Img::new(size, size);
+    for (i, v) in m.iter().enumerate() {
+        let a = (clamp01(*v) * 255.0).round() as u8;
+        img.px[i * 4..i * 4 + 4].copy_from_slice(&[a, a, a, a]);
+    }
+    if let Some(dir) = ASSETS_DIR.get() {
+        let _ = std::fs::write(dir.join(kind).join(format!("{id}.png")), crate::formats::png(&img));
+    }
+    image_store().lock().unwrap().insert(format!("{kind}/{id}"), Arc::new(m));
+}
+
+/// Маска 512×512 для формы отпечатка из произвольной картинки (сохраняет пропорции, по центру).
+pub fn tip_mask_from_image(img: &crate::raster::Img) -> Vec<f32> {
+    let (w, h) = (img.w, img.h);
+    let n = w * h;
+    let has_alpha = img.px.chunks_exact(4).any(|p| p[3] < 250);
+    let lum = |p: &[u8]| -> f32 {
+        let a = p[3] as f32 / 255.0;
+        if a <= 0.0 { return 1.0; }
+        (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0 / a
+    };
+    let mut v = vec![0f32; n];
+    if has_alpha {
+        for (i, p) in img.px.chunks_exact(4).enumerate() { v[i] = p[3] as f32 / 255.0; }
+    } else {
+        let mut border = 0.0f32;
+        let mut cnt = 0.0f32;
+        for x in 0..w { for y in [0, h - 1] { border += lum(&img.px[(y * w + x) * 4..]); cnt += 1.0; } }
+        for y in 0..h { for x in [0, w - 1] { border += lum(&img.px[(y * w + x) * 4..]); cnt += 1.0; } }
+        let light_bg = border / cnt.max(1.0) > 0.5;
+        for (i, p) in img.px.chunks_exact(4).enumerate() { let l = lum(p).clamp(0.0, 1.0); v[i] = if light_bg { 1.0 - l } else { l }; }
+    }
+    // обрезка по содержимому
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h { for x in 0..w { if v[y * w + x] > 0.02 { x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x + 1); y1 = y1.max(y + 1); } } }
+    if x1 <= x0 || y1 <= y0 { return vec![0.0; 512 * 512]; }
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let side = cw.max(ch);
+    let mut sq = crate::raster::Img::new(side, side);
+    let (ox, oy) = ((side - cw) / 2, (side - ch) / 2);
+    for y in 0..ch { for x in 0..cw {
+        let a = (v[(y0 + y) * w + x0 + x] * 255.0).round() as u8;
+        let o = ((oy + y) * side + ox + x) * 4;
+        sq.px[o..o + 4].copy_from_slice(&[a, a, a, a]);
+    } }
+    // небольшой отступ, чтобы край отпечатка не обрезался
+    let inner = 492;
+    let small = sq.resize(inner, inner);
+    let mut out = vec![0f32; 512 * 512];
+    let o = (512 - inner) / 2;
+    for y in 0..inner { for x in 0..inner { out[(o + y) * 512 + o + x] = small.px[(y * inner + x) * 4 + 3] as f32 / 255.0; } }
+    out
+}
+
+/// Текстура зерна 256×256 из картинки: светлое — краска проходит, тёмное — нет.
+pub fn grain_from_image(img: &crate::raster::Img) -> Vec<f32> {
+    let s = img.resize(GRAIN_SIZE, GRAIN_SIZE);
+    s.px.chunks_exact(4).map(|p| {
+        let a = p[3] as f32 / 255.0;
+        let l = (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0;
+        clamp01(l + (1.0 - a))
+    }).collect()
+}
+
+/// Зарегистрировать форму отпечатка; возвращает имя формы для Brush.shape.
+pub fn add_tip_image(mask512: Vec<f32>) -> String {
+    let id = util::uid();
+    store_mask("tips", &id, 512, mask512);
+    format!("img:{id}")
+}
+
+/// Зарегистрировать текстуру; возвращает id для Brush.grain.
+pub fn add_grain_image(v: Vec<f32>) -> String {
+    let id = util::uid();
+    store_mask("grains", &id, GRAIN_SIZE, v);
+    format!("img:{id}")
+}
+
+/// Маска формы для превью и экспорта (512×512).
+pub fn tip_mask(shape: &str) -> Vec<f32> {
+    tip(shape, 1.0, 512).a.clone()
+}
+
+/// Сгладить точки штриха после рисования (концы на месте).
+pub fn smooth_points(pts: &mut [Pt], strength: f32) {
+    let n = pts.len();
+    if n < 4 || strength <= 0.0 { return; }
+    let iters = (strength * 10.0).round().max(1.0) as usize;
+    for _ in 0..iters {
+        let prev: Vec<Pt> = pts.to_vec();
+        for i in 1..n - 1 {
+            pts[i].x = prev[i].x * 0.5 + (prev[i - 1].x + prev[i + 1].x) * 0.25;
+            pts[i].y = prev[i].y * 0.5 + (prev[i - 1].y + prev[i + 1].y) * 0.25;
+        }
+    }
+}
 
 pub const SHAPES: [(&str, &str); 26] = [
     ("round", "Круглая"), ("square", "Квадратная"), ("chalk", "Меловая"), ("bristle", "Ворс"), ("rake", "Гребёнка"), ("spray", "Распыление"),
@@ -135,7 +265,7 @@ impl BrushLib {
     }
     pub fn list(&self, cat: &str) -> Vec<&Brush> {
         if cat == "custom" {
-            return self.custom.iter().collect();
+            return self.custom.iter().filter(|b| !CATS.iter().any(|c| c.0 == b.cat) || b.cat == "custom").collect();
         }
         let mut v: Vec<&Brush> = self.presets.iter().filter(|b| b.cat == cat).map(|b| self.get(&b.id)).collect();
         v.extend(self.custom.iter().filter(|b| b.cat == cat));
@@ -176,6 +306,21 @@ impl BrushLib {
     pub fn remove(&mut self, id: &str) {
         self.custom.retain(|b| b.id != id);
         self.version += 1;
+    }
+    /// Добавить импортированные кисти; возвращает id первой.
+    pub fn add_imported(&mut self, list: Vec<Brush>) -> Option<String> {
+        let mut first = None;
+        for mut b in list {
+            b.id = format!("c_{}", util::uid());
+            if b.cat.is_empty() { b.cat = "imported".into(); }
+            b.preset = false;
+            first.get_or_insert_with(|| b.id.clone());
+            self.custom.push(b);
+            // uid() зависит от времени — разводим идентификаторы
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+        self.version += 1;
+        first
     }
 }
 
@@ -287,6 +432,12 @@ impl M {
 }
 
 fn gen_tip(shape: &str, hard: f32, sz: usize) -> Vec<f32> {
+    if let Some(id) = shape.strip_prefix("img:") {
+        if let Some(m) = stored_mask("tips", id, 512) {
+            return if sz == 512 { (*m).clone() } else { downsample(&m, 512) };
+        }
+        return gen_tip("round", hard, sz);
+    }
     let mut m = M::new(sz);
     let s = sz as f32;
     let r = s / 2.0;
@@ -615,7 +766,11 @@ pub fn grain(id: &str) -> Arc<Grain> {
     if let Some(g) = c.lock().unwrap().get(id) {
         return g.clone();
     }
-    let g = Arc::new(Grain { v: gen_grain(id) });
+    let v = match id.strip_prefix("img:") {
+        Some(iid) => stored_mask("grains", iid, GRAIN_SIZE).map(|m| (*m).clone()).unwrap_or_else(|| gen_grain("paper")),
+        None => gen_grain(id),
+    };
+    let g = Arc::new(Grain { v });
     c.lock().unwrap().insert(id.to_string(), g.clone());
     g
 }
@@ -687,9 +842,26 @@ pub struct Stroke {
     pub dirty: Option<Rect>,
     pub gamma: f32,
     pub streamline_mul: f32,
+    /// Радиус «ленивой кисти» (стабилизатор с нитью) в пикселях холста.
+    pub lazy_r: f32,
+    lazy: Option<Pt>,
 }
 
 impl Stroke {
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+    pub fn set_seed(&mut self, seed: u32) {
+        self.seed = seed;
+        self.rng = Rng::new(seed);
+    }
+    /// Положение кисти при включённом стабилизаторе.
+    pub fn lazy_pos(&self) -> Option<Pt> {
+        if self.lazy_r > 0.0 { self.lazy } else { None }
+    }
+    pub fn last_input(&self) -> Option<Pt> {
+        self.last_raw
+    }
     pub fn new(b: Brush, size: f32, rgb: [u8; 3], mirrors: Vec<Mirror>, gamma: f32, streamline_mul: f32) -> Stroke {
         let jitter_col = b.j_hue > 0.0 || b.j_sat > 0.0 || b.j_bri > 0.0;
         let seed = util::random_seed();
@@ -713,6 +885,8 @@ impl Stroke {
             dirty: None,
             gamma,
             streamline_mul,
+            lazy_r: 0.0,
+            lazy: None,
             b,
         }
     }
@@ -725,7 +899,27 @@ impl Stroke {
         self.last_size = self.base;
     }
     pub fn add(&mut self, x: f32, y: f32, p: f32, tilt: f32, sink: &mut dyn Sink) {
-        let raw = Pt { x, y, p, tilt };
+        let mut raw = Pt { x, y, p, tilt };
+        if self.lazy_r > 0.0 {
+            // Стабилизатор «нить»: кисть догоняет перо, только когда нить натянута.
+            let l = match self.lazy {
+                None => raw,
+                Some(l) => {
+                    let (dx, dy) = (x - l.x, y - l.y);
+                    let d = dx.hypot(dy);
+                    if d <= self.lazy_r {
+                        self.lazy = Some(Pt { p: l.p.max(p * 0.5 + l.p * 0.5), ..l });
+                        if let Some(last) = self.pts.last_mut() { last.p = last.p.max(self.lazy.unwrap().p); }
+                        self.last_raw = self.lazy;
+                        return;
+                    }
+                    let k = (d - self.lazy_r) / d;
+                    Pt { x: l.x + dx * k, y: l.y + dy * k, p: l.p + (p - l.p) * 0.5, tilt }
+                }
+            };
+            self.lazy = Some(l);
+            raw = l;
+        }
         self.last_raw = Some(raw);
         let next = match self.sm {
             None => raw,
@@ -865,6 +1059,7 @@ impl Stroke {
     pub fn replace(&mut self, pts: Vec<Pt>) {
         self.sm = pts.last().copied();
         self.last_raw = self.sm;
+        if self.lazy.is_some() { self.lazy = self.sm; }
         self.pts = pts;
     }
     fn stamp_at(&mut self, pt: Pt, d: f32, sink: &mut dyn Sink) {
