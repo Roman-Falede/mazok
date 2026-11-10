@@ -35,6 +35,8 @@ pub struct Prefs {
     pub quick_export: bool,
     /// Последняя папка в диалогах открытия и сохранения.
     pub last_dir: String,
+    /// Ширина миниатюр в панели слоёв.
+    pub layer_thumb: f32,
 }
 
 impl Default for Prefs {
@@ -43,7 +45,7 @@ impl Default for Prefs {
             pressure_gamma: 1.0, streamline_mul: 1.0, fill_tol: 22.0, fill_expand: 1, fill_all_layers: false, pick_layer: false,
             quick_shape: true, quick_shape_delay: 0.65, hold_pick: true, hold_delay: 0.45, touch_draw: true, ui_mode: "auto".into(),
             light: false, cursor: true, ui_scale: 1.0, clone_aligned: true, stabilizer: 0.0, post_smooth: 0.0, vector_erase: "intersect".into(),
-            export_dir: String::new(), quick_export: false, last_dir: String::new(),
+            export_dir: String::new(), quick_export: false, last_dir: String::new(), layer_thumb: 44.0,
         }
     }
 }

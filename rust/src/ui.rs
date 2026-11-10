@@ -72,6 +72,14 @@ pub struct UiState {
     pub op_before: Option<(usize, Props)>,
     pub bset_open: [bool; 9],
     pub palette_export: Option<(usize, &'static str)>,
+    /// Протяжка по глазкам: какую видимость ставить.
+    pub eye_drag: Option<bool>,
+    /// Свёрнутые группы дока.
+    pub dock_collapsed: [bool; 3],
+    /// Слой, к которому список уже прокручен.
+    pub layer_scrolled: String,
+    /// Перетаскиваемый слой (id).
+    pub layer_drag: Option<String>,
     pub font_cache: HashMap<String, Vec<u8>>,
 }
 
@@ -80,7 +88,7 @@ impl Default for UiState {
         UiState {
             new_canvas: None, rename: None, layer_rename: None, resize: None, text: None, settings: false, help: false, confirm_delete: None,
             feather: None, dock_tab: [0, 0, 0], brush_cat: String::new(), win: Wins::default(), hex: String::new(), hsva: None, op_before: None,
-            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, font_cache: HashMap::new(),
+            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
         }
     }
 }
@@ -139,6 +147,14 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, name: &str, c: Color32) {
         "lock" => { line(&[(5.0, 10.5), (19.0, 10.5), (19.0, 20.5), (5.0, 20.5), (5.0, 10.5)]); line(&[(8.0, 10.5), (8.0, 8.0), (10.0, 4.5), (14.0, 4.5), (16.0, 8.0), (16.0, 10.5)]); }
         "alphalock" => { dashed(&[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0), (4.0, 4.0)]); line(&[(9.0, 12.5), (15.0, 12.5)]); line(&[(12.0, 9.5), (12.0, 15.5)]); }
         "clip" => { line(&[(7.0, 4.0), (7.0, 13.0), (10.0, 16.0), (19.0, 16.0)]); line(&[(16.0, 13.0), (19.0, 16.0), (16.0, 19.0)]); }
+        "folder" => { line(&[(3.0, 6.5), (9.0, 6.5), (11.0, 8.5), (21.0, 8.5), (21.0, 19.0), (3.0, 19.0), (3.0, 6.5)]); line(&[(3.0, 11.0), (21.0, 11.0)]); }
+        "folder_new" => { line(&[(3.0, 6.5), (9.0, 6.5), (11.0, 8.5), (21.0, 8.5), (21.0, 19.0), (3.0, 19.0), (3.0, 6.5)]); line(&[(12.0, 11.5), (12.0, 17.0)]); line(&[(9.25, 14.25), (14.75, 14.25)]); }
+        "mask" => { line(&[(3.5, 4.5), (20.5, 4.5), (20.5, 19.5), (3.5, 19.5), (3.5, 4.5)]); p.circle_filled(q(12.0, 12.0), 4.5 * k, c); }
+        "ref" => { circ(12.0, 12.0, 7.5); circ(12.0, 12.0, 3.0); line(&[(12.0, 2.5), (12.0, 6.0)]); line(&[(12.0, 18.0), (12.0, 21.5)]); line(&[(2.5, 12.0), (6.0, 12.0)]); line(&[(18.0, 12.0), (21.5, 12.0)]); }
+        "draft" => { line(&[(4.0, 20.0), (5.0, 15.0), (16.0, 4.0), (20.0, 8.0), (9.0, 19.0), (4.0, 20.0)]); dashed(&[(3.0, 22.0), (21.0, 22.0)]); }
+        "tint" => { line(&[(12.0, 3.5), (17.5, 11.0), (18.0, 15.0), (15.5, 19.0), (12.0, 20.5), (8.5, 19.0), (6.0, 15.0), (6.5, 11.0), (12.0, 3.5)]); }
+        "transfer" => { line(&[(12.0, 3.5), (12.0, 13.0)]); line(&[(8.0, 9.5), (12.0, 13.5), (16.0, 9.5)]); line(&[(4.0, 16.0), (20.0, 16.0), (20.0, 20.5), (4.0, 20.5), (4.0, 16.0)]); }
+        "raster_new" => { line(&[(5.0, 3.5), (15.0, 3.5), (19.0, 7.5), (19.0, 20.5), (5.0, 20.5), (5.0, 3.5)]); line(&[(12.0, 9.0), (12.0, 17.0)]); line(&[(8.0, 13.0), (16.0, 13.0)]); }
         "vector" => { let pts: Vec<(f32, f32)> = (0..=16).map(|i| { let t = i as f32 / 16.0; let u = 1.0 - t; (u * u * 4.0 + 2.0 * u * t * 12.0 + t * t * 20.0, u * u * 19.0 + 2.0 * u * t * 1.0 + t * t * 19.0) }).collect(); line(&pts); for (x, y) in [(4.0, 19.0), (20.0, 19.0)] { p.rect_stroke(Rect::from_center_size(q(x, y), Vec2::splat(4.0 * k)), 0.0, s, egui::StrokeKind::Middle); } p.circle_filled(q(12.0, 10.0), 1.8 * k, c); }
         _ => { p.circle_filled(r.center(), 2.0 * k, c); }
     }
@@ -370,6 +386,17 @@ fn layer_menu(ui: &mut Ui, cx: &mut Cx) {
     if ui.add(egui::Button::new("Новый слой").shortcut_text("Ctrl+Shift+N")).clicked() { ed.layer_add(); ui.close_menu(); }
     if ui.button("Новый векторный слой").on_hover_text("Линии остаются линиями: их можно стирать до пересечения и масштабировать без потерь").clicked() { ed.layer_add_vector(); ui.close_menu(); }
     if ed.doc.layer().is_vector() && ui.button("Растеризовать слой").clicked() { ed.layer_rasterize(); ui.close_menu(); }
+    if ui.button("Новая папка").clicked() { ed.layer_add_folder(); ui.close_menu(); }
+    if ui.add(egui::Button::new("Объединить в папку").shortcut_text("Ctrl+G")).clicked() { ed.group_selected(); ui.close_menu(); }
+    if ed.doc.layer().group && ui.add(egui::Button::new("Расформировать папку").shortcut_text("Ctrl+Shift+G")).clicked() { ed.ungroup(); ui.close_menu(); }
+    ui.menu_button("Маска слоя", |ui| {
+        let has = ed.doc.layer().mask.is_some();
+        if !has && ui.button("Создать маску (по выделению)").clicked() { ed.mask_add(); ui.close_menu(); }
+        if has && ui.button("Рисовать по маске").clicked() { let a = ed.doc.active; ed.layer_select_mask(a); ui.close_menu(); }
+        if has && ui.button("Инвертировать маску").clicked() { ed.mask_invert(); ui.close_menu(); }
+        if has && ui.button("Применить маску").clicked() { ed.mask_apply(); ui.close_menu(); }
+        if has && ui.button("Удалить маску").clicked() { ed.mask_delete(); ui.close_menu(); }
+    });
     if ui.add(egui::Button::new("Дублировать слой").shortcut_text("Ctrl+J")).clicked() { ed.layer_duplicate(); ui.close_menu(); }
     if ui.button("Удалить слой").clicked() { ed.layer_delete(); ui.close_menu(); }
     if ui.button("Переименовать…").clicked() { cx.st.layer_rename = Some((li, ed.doc.layer().name.clone())); ui.close_menu(); }
@@ -388,6 +415,9 @@ fn layer_menu(ui: &mut Ui, cx: &mut Cx) {
     if ui.selectable_label(!vis, "Скрыть слой").clicked() { ed.layer_props(li, |l| l.visible = !vis, "Видимость слоя"); ui.close_menu(); }
     ui.separator();
     if ui.add(egui::Button::new("Объединить с нижним").shortcut_text("Ctrl+E")).clicked() { ed.merge_down(); ui.close_menu(); }
+    if ui.button("Перенести на нижний слой").clicked() { ed.transfer_down(); ui.close_menu(); }
+    if ui.button("Совместить видимые на новом слое").clicked() { ed.merge_visible_new(); ui.close_menu(); }
+    if ui.add(egui::Button::new("Слой выше / ниже").shortcut_text("Ctrl+] / Ctrl+[")).clicked() { ed.layer_step(true); ui.close_menu(); }
     if ui.add(egui::Button::new("Выполнить сведение").shortcut_text("Ctrl+Shift+E")).clicked() { ed.flatten_all(); ui.close_menu(); }
 }
 
@@ -914,110 +944,371 @@ fn brushset_panel(ui: &mut Ui, cx: &mut Cx) {
     if b != orig { cx.sh.brushes.update(b); }
 }
 
+/// Действия в панели слоёв (выполняются после отрисовки списка).
+enum LAct {
+    Select(usize),
+    Toggle(usize),
+    Range(usize),
+    Mask(usize),
+    Content(usize),
+    Vis(usize, bool),
+    Solo(usize),
+    Collapse(usize),
+    Rename(usize),
+    Op(&'static str, usize),
+    Move(String, editor::Drop),
+    Tint(usize, Option<[u8; 3]>),
+}
+
+fn layer_sub(l: &crate::doc::Layer) -> String {
+    let mut s = vec![format!("{:.0} %", l.opacity * 100.0), if l.group && l.pass { "Сквозной".to_string() } else { l.blend.name().to_string() }];
+    if l.text.is_some() { s.push("текст".into()); }
+    if let Some(v) = &l.vector { s.push(format!("вектор · {}", v.len())); }
+    if l.mask.is_some() { s.push(if l.mask_on { "маска".into() } else { "маска выкл.".into() }); }
+    if l.draft { s.push("черновой".into()); }
+    if l.reference { s.push("референс".into()); }
+    if l.tint.is_some() { s.push("цвет слоя".into()); }
+    s.join(" · ")
+}
+
+/// Меню действий со слоем (правая кнопка и «Ещё»).
+fn layer_menu_items(ui: &mut Ui, l: &crate::doc::Layer, i: usize, nsel: usize, out: &mut Vec<LAct>) {
+    let b = |ui: &mut Ui, label: &str, key: &'static str, out: &mut Vec<LAct>| { if ui.button(label).clicked() { out.push(LAct::Op(key, i)); ui.close_menu(); } };
+    b(ui, "Новый растровый слой", "new_raster", out);
+    b(ui, "Новый векторный слой", "new_vector", out);
+    b(ui, "Новая папка", "new_folder", out);
+    ui.separator();
+    b(ui, if nsel > 1 { "Дублировать выбранные" } else { "Дублировать" }, "dup", out);
+    b(ui, if nsel > 1 { "Удалить выбранные" } else { "Удалить" }, "del", out);
+    b(ui, "Переименовать…", "rename", out);
+    ui.separator();
+    b(ui, "Объединить в папку  (Ctrl+G)", "group", out);
+    if l.group {
+        b(ui, "Расформировать папку", "ungroup", out);
+        b(ui, "Объединить папку в слой", "merge_folder", out);
+        if ui.selectable_label(l.pass, "Сквозной режим папки").clicked() { out.push(LAct::Op("pass", i)); ui.close_menu(); }
+    }
+    if nsel > 1 { b(ui, "Объединить выбранные слои", "merge_sel", out); }
+    if !l.group {
+        b(ui, "Объединить с нижним  (Ctrl+E)", "merge_down", out);
+        b(ui, "Перенести на нижний слой", "transfer", out);
+    }
+    b(ui, "Совместить видимые на новом слое", "merge_visible", out);
+    ui.separator();
+    ui.menu_button("Маска слоя", |ui| {
+        if l.mask.is_none() {
+            if ui.button("Создать маску (по выделению)").clicked() { out.push(LAct::Op("mask_add", i)); ui.close_menu(); }
+        } else {
+            if ui.button("Рисовать по маске").clicked() { out.push(LAct::Mask(i)); ui.close_menu(); }
+            if ui.selectable_label(l.mask_on, "Маска включена").clicked() { out.push(LAct::Op("mask_toggle", i)); ui.close_menu(); }
+            if ui.button("Инвертировать маску").clicked() { out.push(LAct::Op("mask_inv", i)); ui.close_menu(); }
+            if !l.group && ui.button("Применить маску к слою").clicked() { out.push(LAct::Op("mask_apply", i)); ui.close_menu(); }
+            if ui.button("Удалить маску").clicked() { out.push(LAct::Op("mask_del", i)); ui.close_menu(); }
+        }
+    });
+    for (on, label, key) in [(l.clip, "Обтравочная маска (по нижнему слою)", "clip"), (l.reference, "Референсный слой (для заливки)", "ref"), (l.draft, "Черновой слой (не экспортируется)", "draft"), (l.locked, "Закрепить слой", "lock")] {
+        if ui.selectable_label(on, label).clicked() { out.push(LAct::Op(key, i)); ui.close_menu(); }
+    }
+    if !l.group && ui.selectable_label(l.alpha_lock, "Защитить прозрачность").clicked() { out.push(LAct::Op("alock", i)); ui.close_menu(); }
+    ui.horizontal(|ui| {
+        let mut on = l.tint.is_some();
+        if ui.checkbox(&mut on, "Цвет слоя").changed() { out.push(LAct::Tint(i, if on { Some([60, 110, 230]) } else { None })); }
+        let mut c = l.tint.unwrap_or([60, 110, 230]);
+        if ui.color_edit_button_srgb(&mut c).changed() { out.push(LAct::Tint(i, Some(c))); }
+    });
+    ui.separator();
+    b(ui, "Выделить по содержимому", "content", out);
+    if l.is_vector() { b(ui, "Растеризовать", "rasterize", out); }
+    if !l.group {
+        b(ui, "Отразить по горизонтали", "flip_h", out);
+        b(ui, "Отразить по вертикали", "flip_v", out);
+        b(ui, "Очистить", "clear", out);
+    }
+}
+
 fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
-    let ed = &mut *cx.ed;
-    let li = ed.doc.active;
-    let l = ed.doc.layer().clone();
+    let li = cx.ed.doc.active;
+    let l = cx.ed.doc.layer().clone();
+    let mut acts: Vec<LAct> = vec![];
+    // режим наложения и непрозрачность
     ui.horizontal(|ui| {
         let mut b = l.blend;
-        egui::ComboBox::from_id_salt("lblend").selected_text(b.name()).width(150.0).show_ui(ui, |ui| {
-            for (i, (bl, _, n, _)) in BLENDS.iter().enumerate() { if GROUP_STARTS.contains(&i) { ui.separator(); } ui.selectable_value(&mut b, *bl, *n); }
+        let mut pass = l.group && l.pass;
+        egui::ComboBox::from_id_salt("lblend").selected_text(if pass { "Сквозной" } else { b.name() }).width(150.0).show_ui(ui, |ui| {
+            if l.group { ui.selectable_value(&mut pass, true, "Сквозной"); }
+            for (i, (bl, _, n, _)) in BLENDS.iter().enumerate() {
+                if GROUP_STARTS.contains(&i) { ui.separator(); }
+                if ui.selectable_label(!pass && b == *bl, *n).clicked() { b = *bl; pass = false; }
+            }
         });
-        if b != l.blend { ed.layer_props(li, |x| x.blend = b, "Режим наложения"); }
+        if b != l.blend || (l.group && pass != l.pass) { cx.ed.layer_props(li, |x| { x.blend = b; if x.group { x.pass = pass; } }, "Режим наложения"); }
     });
     ui.horizontal(|ui| {
         ui.label("Непрозр.");
         let mut op = l.opacity;
         let r = ui.add(egui::Slider::new(&mut op, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
         if r.drag_started() || (r.changed() && cx.st.op_before.is_none()) { cx.st.op_before = Some((li, l.props())); }
-        if r.changed() { ed.layer_props_live(li, |x| x.opacity = op); }
+        if r.changed() { cx.ed.layer_props_live(li, |x| x.opacity = op); }
         if (r.drag_stopped() || (r.changed() && !r.dragged())) && cx.st.op_before.is_some() {
-            if let Some((i, before)) = cx.st.op_before.take() { ed.layer_props_commit(i, before, "Непрозрачность слоя"); }
+            if let Some((i, before)) = cx.st.op_before.take() { cx.ed.layer_props_commit(i, before, "Непрозрачность слоя"); }
         }
     });
+    // свойства активного слоя
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Закрепить:").weak());
-        if icon_btn(ui, "alphalock", l.alpha_lock, "Защита прозрачности", Vec2::new(26.0, 22.0)).clicked() { ed.layer_props(li, |x| x.alpha_lock = !l.alpha_lock, "Защита прозрачности"); }
-        if icon_btn(ui, "lock", l.locked, "Блокировка слоя", Vec2::new(26.0, 22.0)).clicked() { ed.layer_props(li, |x| x.locked = !l.locked, "Блокировка слоя"); }
-        if icon_btn(ui, "clip", l.clip, "Обтравочная маска", Vec2::new(26.0, 22.0)).clicked() { ed.layer_props(li, |x| x.clip = !l.clip, "Обтравочная маска"); }
-        ui.label(egui::RichText::new(format!("{}/{}", ed.doc.layers.len(), ed.doc.max_layers())).weak());
+        let s = Vec2::new(26.0, 22.0);
+        if icon_btn(ui, "clip", l.clip, "Обтравочная маска: рисовать только поверх нижнего слоя", s).clicked() { acts.push(LAct::Op("clip", li)); }
+        if icon_btn(ui, "ref", l.reference, "Референсный слой: заливка ищет границы по нему", s).clicked() { acts.push(LAct::Op("ref", li)); }
+        if icon_btn(ui, "draft", l.draft, "Черновой слой: виден при работе, но не экспортируется", s).clicked() { acts.push(LAct::Op("draft", li)); }
+        if icon_btn(ui, "lock", l.locked, "Закрепить слой", s).clicked() { acts.push(LAct::Op("lock", li)); }
+        if !l.group && icon_btn(ui, "alphalock", l.alpha_lock, "Защитить прозрачность", s).clicked() { acts.push(LAct::Op("alock", li)); }
+        let mtip = if l.mask.is_none() { "Создать маску слоя (по выделению)" } else if l.mask_on { "Маска включена — щёлкните, чтобы выключить" } else { "Маска выключена — щёлкните, чтобы включить" };
+        if icon_btn(ui, "mask", l.mask.is_some() && l.mask_on, mtip, s).clicked() { acts.push(LAct::Op(if l.mask.is_none() { "mask_add" } else { "mask_toggle" }, li)); }
+        if icon_btn(ui, "tint", l.tint.is_some(), "Цвет слоя: показать содержимое одним цветом (для набросков)", s).clicked() { acts.push(LAct::Tint(li, if l.tint.is_some() { None } else { Some([60, 110, 230]) })); }
+        if let Some(mut c) = l.tint { if ui.color_edit_button_srgb(&mut c).changed() { acts.push(LAct::Tint(li, Some(c))); } }
     });
+    if cx.ed.editing_mask() {
+        ui.label(egui::RichText::new("Рисование по маске: ластик скрывает, кисть возвращает").color(ACCENT).size(11.5));
+    }
     ui.separator();
-    let n = ed.doc.layers.len();
+    // список слоёв
+    let rows = cx.ed.visible_rows();
+    let th = cx.sh.prefs.layer_thumb.clamp(28.0, 96.0);
+    let row_h = (th * 0.75).max(28.0) + 8.0;
     let ctx = ui.ctx().clone();
-    let mut select = None;
-    let mut toggle_vis = None;
-    let mut mv = None;
-    for p in 0..n {
-        let i = n - 1 - p;
-        let layer = &ed.doc.layers[i];
-        let t = texture(&ctx, cx.tex, format!("l:{}", layer.id), layer.ver, || {
-            let th = layer.img.thumbnail(56);
-            let mut bg = Img::filled(th.w, th.h, [255, 255, 255, 255]);
-            for y in 0..th.h { for x in 0..th.w { if (x / 5 + y / 5) % 2 == 1 { let k = bg.idx(x, y); bg.px[k..k + 3].copy_from_slice(&[214, 214, 214]); } } }
-            bg.draw_over(0, 0, &th, 1.0);
-            bg
-        });
-        let active = i == li;
-        let frame = egui::Frame::default().inner_margin(3.0).corner_radius(4.0).fill(if active { ACCENT.gamma_multiply(0.35) } else { Color32::TRANSPARENT });
-        frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if layer.clip && i > 0 {
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
-                    paint_icon(ui.painter(), r, "clip", ui.visuals().weak_text_color());
-                }
-                let vis = layer.visible;
-                if icon_btn(ui, if vis { "eye" } else { "more" }, false, "Видимость", Vec2::new(22.0, 22.0)).clicked() { toggle_vis = Some(i); }
-                let ir = ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(44.0, 34.0)).sense(Sense::click()));
-                let mut sub = vec![];
-                if layer.blend != Blend::Normal { sub.push(layer.blend.name().to_string()); }
-                if layer.opacity < 1.0 { sub.push(format!("{:.0}%", layer.opacity * 100.0)); }
-                if layer.text.is_some() { sub.push("текст".into()); }
-                if let Some(v) = &layer.vector { sub.push(format!("вектор · {} линий", v.len())); }
-                if layer.locked { sub.push("закреплён".into()); }
-                let lr = ui.add(egui::Label::new(egui::RichText::new(format!("{}{}", layer.name, if sub.is_empty() { String::new() } else { format!("\n{}", sub.join(" · ")) })).size(12.5)).sense(Sense::click()).truncate());
-                if ir.clicked() || lr.clicked() { select = Some(i); }
-                if lr.double_clicked() { cx.st.layer_rename = Some((i, layer.name.clone())); }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if i > 0 && icon_btn(ui, "down", false, "Ниже", Vec2::new(20.0, 20.0)).clicked() { mv = Some((i, i - 1)); }
-                    if i + 1 < n && icon_btn(ui, "up", false, "Выше", Vec2::new(20.0, 20.0)).clicked() { mv = Some((i, i + 1)); }
-                });
+    let (pdown, hover, press, mods) = ui.input(|i| (i.pointer.primary_down(), i.pointer.hover_pos(), i.pointer.press_origin(), i.modifiers));
+    let nsel = cx.ed.selected().len();
+    let dragging = cx.st.layer_drag.clone();
+    let mut drop_target: Option<editor::Drop> = None;
+    let text_col = ui.visuals().text_color();
+    let weak = ui.visuals().weak_text_color();
+    let list_h = (ui.available_height() - 104.0).max(140.0);
+    egui::ScrollArea::vertical().id_salt("layers_list").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+    for &i in &rows {
+        let layer = cx.ed.doc.layers[i].clone();
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, row_h), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        let active = i == cx.ed.doc.active;
+        if active && cx.st.layer_scrolled != layer.id { resp.scroll_to_me(None); cx.st.layer_scrolled = layer.id.clone(); }
+        let multi = cx.ed.multi.contains(&layer.id);
+        let in_drag = dragging.as_ref().map_or(false, |d| *d == layer.id || crate::doc::is_inside(&cx.ed.doc.layers, i, d));
+        let bg = if active { ACCENT.gamma_multiply(0.42) } else if multi { ACCENT.gamma_multiply(0.22) } else if resp.hovered() { ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.6) } else { Color32::TRANSPARENT };
+        p.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 4.0, bg);
+        if in_drag { p.rect_filled(rect, 4.0, Color32::from_black_alpha(60)); }
+        let cy = rect.center().y;
+        // глаз
+        let eye_r = Rect::from_center_size(Pos2::new(rect.left() + 14.0, cy), Vec2::new(22.0, 20.0));
+        let shown = crate::doc::shown(&cx.ed.doc.layers, i);
+        paint_icon(&p, eye_r, "eye", if layer.visible { if shown { text_col } else { weak } } else { weak.gamma_multiply(0.35) });
+        if !layer.visible { p.line_segment([eye_r.left_bottom() + Vec2::new(3.0, -3.0), eye_r.right_top() + Vec2::new(-3.0, 3.0)], EStroke::new(1.4, weak)); }
+        let depth = crate::doc::depth(&cx.ed.doc.layers, i) as f32;
+        let mut x = eye_r.right() + 4.0 + depth * 14.0;
+        if depth > 0.0 { p.line_segment([Pos2::new(x - 7.0, rect.top()), Pos2::new(x - 7.0, rect.bottom())], EStroke::new(1.0, weak.gamma_multiply(0.4))); }
+        if layer.clip {
+            let cr = Rect::from_min_size(Pos2::new(x, cy - 8.0), Vec2::splat(14.0));
+            paint_icon(&p, cr, "clip", ACCENT);
+            x += 14.0;
+        }
+        let mut tri_r = Rect::NOTHING;
+        if layer.group {
+            tri_r = Rect::from_center_size(Pos2::new(x + 6.0, cy), Vec2::splat(14.0));
+            let c = tri_r.center();
+            let pts = if layer.collapsed { vec![c + Vec2::new(-3.0, -5.0), c + Vec2::new(4.0, 0.0), c + Vec2::new(-3.0, 5.0)] } else { vec![c + Vec2::new(-5.0, -3.0), c + Vec2::new(5.0, -3.0), c + Vec2::new(0.0, 4.0)] };
+            p.add(egui::Shape::convex_polygon(pts, text_col, EStroke::NONE));
+            x += 14.0;
+        }
+        let thumb_r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(th, row_h - 8.0));
+        if layer.group {
+            p.rect_filled(thumb_r, 3.0, ui.visuals().faint_bg_color);
+            paint_icon(&p, Rect::from_center_size(thumb_r.center(), Vec2::splat((row_h - 8.0) * 0.9)), "folder", text_col);
+        } else {
+            let lr = &layer;
+            let t = texture(&ctx, cx.tex, format!("l:{}", layer.id), layer.ver, || {
+                let src = if lr.tint.is_some() { lr.baked() } else { (*lr.img).clone() };
+                let th = src.thumbnail(64);
+                let mut bg = Img::filled(th.w.max(1), th.h.max(1), [255, 255, 255, 255]);
+                for y in 0..bg.h { for x in 0..bg.w { if (x / 5 + y / 5) % 2 == 1 { let k = bg.idx(x, y); bg.px[k..k + 3].copy_from_slice(&[214, 214, 214]); } } }
+                bg.draw_over(0, 0, &th, 1.0);
+                bg
             });
+            let sz = t.size_vec2();
+            let k = (thumb_r.width() / sz.x).min(thumb_r.height() / sz.y);
+            let ir = Rect::from_center_size(thumb_r.center(), sz * k);
+            p.image(t.id(), ir, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        if active && !cx.ed.mask_edit { p.rect_stroke(thumb_r.expand(1.0), 3.0, EStroke::new(1.5, ACCENT), egui::StrokeKind::Outside); }
+        x = thumb_r.right() + 4.0;
+        let mut mask_r = Rect::NOTHING;
+        if let Some(m) = &layer.mask {
+            mask_r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(th, row_h - 8.0));
+            let mm = m.clone();
+            let t = texture(&ctx, cx.tex, format!("m:{}", layer.id), layer.ver, || {
+                let th = mm.thumbnail(64);
+                let mut g = Img::new(th.w.max(1), th.h.max(1));
+                for (d, s) in g.px.chunks_exact_mut(4).zip(th.px.chunks_exact(4)) { d.copy_from_slice(&[s[3], s[3], s[3], 255]); }
+                g
+            });
+            let sz = t.size_vec2();
+            let k = (mask_r.width() / sz.x).min(mask_r.height() / sz.y);
+            p.image(t.id(), Rect::from_center_size(mask_r.center(), sz * k), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), if layer.mask_on { Color32::WHITE } else { Color32::from_gray(110) });
+            if active && cx.ed.mask_edit { p.rect_stroke(mask_r.expand(1.0), 3.0, EStroke::new(1.5, ACCENT), egui::StrokeKind::Outside); }
+            x = mask_r.right() + 4.0;
+        }
+        // название и сведения
+        let name_r = Rect::from_min_max(Pos2::new(x + 2.0, rect.top()), Pos2::new(rect.right() - 4.0, rect.bottom()));
+        let font = egui::FontId::proportional(13.0);
+        p.text(Pos2::new(name_r.left(), cy - 1.0), egui::Align2::LEFT_BOTTOM, &layer.name, font, if active { Color32::WHITE } else { text_col });
+        p.text(Pos2::new(name_r.left(), cy + 1.0), egui::Align2::LEFT_TOP, layer_sub(&layer), egui::FontId::proportional(10.5), if active { Color32::from_white_alpha(200) } else { weak });
+        if crate::doc::locked(&cx.ed.doc.layers, i) {
+            paint_icon(&p, Rect::from_center_size(Pos2::new(rect.right() - 12.0, cy), Vec2::splat(15.0)), "lock", weak);
+        }
+        // щелчки
+        if resp.clicked() {
+            let pos = resp.interact_pointer_pos().unwrap_or(rect.center());
+            if eye_r.contains(pos) { acts.push(if mods.alt { LAct::Solo(i) } else { LAct::Vis(i, !layer.visible) }); }
+            else if tri_r.contains(pos) { acts.push(LAct::Collapse(i)); }
+            else if mask_r.contains(pos) { acts.push(LAct::Mask(i)); }
+            else if thumb_r.contains(pos) && mods.command { acts.push(LAct::Content(i)); }
+            else if mods.command { acts.push(LAct::Toggle(i)); }
+            else if mods.shift { acts.push(LAct::Range(i)); }
+            else { acts.push(LAct::Select(i)); }
+        }
+        if resp.double_clicked() && resp.interact_pointer_pos().map_or(false, |p| name_r.contains(p)) { acts.push(LAct::Rename(i)); }
+        // перетаскивание: по глазам — видимость, по строке — порядок
+        if resp.drag_started() {
+            if press.map_or(false, |p| eye_r.contains(p)) {
+                cx.st.eye_drag = Some(!layer.visible);
+                acts.push(LAct::Vis(i, !layer.visible));
+            } else {
+                cx.st.layer_drag = Some(layer.id.clone());
+                if !active && !multi { acts.push(LAct::Select(i)); }
+            }
+        }
+        if let (Some(v), Some(hp)) = (cx.st.eye_drag, hover) {
+            if rect.contains(hp) && layer.visible != v { acts.push(LAct::Vis(i, v)); }
+        }
+        if let (Some(d), Some(hp)) = (&dragging, hover) {
+            if rect.contains(hp) && !in_drag && *d != layer.id {
+                let rel = (hp.y - rect.top()) / row_h;
+                let target = if layer.group && (rel > 0.3 && (rel < 0.7 || !layer.collapsed)) { editor::Drop::Into(layer.id.clone()) }
+                    else if rel < 0.5 { editor::Drop::Above(layer.id.clone()) } else { editor::Drop::Below(layer.id.clone()) };
+                let st = EStroke::new(2.5, ACCENT);
+                match &target {
+                    editor::Drop::Into(_) => { p.rect_stroke(rect.shrink(1.5), 4.0, st, egui::StrokeKind::Inside); }
+                    editor::Drop::Above(_) => { p.line_segment([rect.left_top() + Vec2::new(0.0, 1.5), rect.right_top() + Vec2::new(0.0, 1.5)], st); }
+                    editor::Drop::Below(_) => { p.line_segment([rect.left_bottom() - Vec2::new(0.0, 1.5), rect.right_bottom() - Vec2::new(0.0, 1.5)], st); }
+                }
+                drop_target = Some(target);
+            }
+        }
+        // меню по правой кнопке
+        resp.context_menu(|ui| {
+            if !active && !multi { acts.push(LAct::Select(i)); }
+            layer_menu_items(ui, &layer, i, nsel, &mut acts);
         });
     }
-    if let Some(i) = select { ed.layer_select(i); }
-    if let Some(i) = toggle_vis { let v = ed.doc.layers[i].visible; ed.layer_props(i, |x| x.visible = !v, "Видимость слоя"); }
-    if let Some((a, b)) = mv { ed.layer_move(a, b); }
+    });
+    if let Some(d) = &dragging {
+        if let Some(hp) = hover {
+            let name = cx.ed.doc.find(d).map(|k| cx.ed.doc.layers[k].name.clone()).unwrap_or_default();
+            let lp = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("layer-drag")));
+            let r = Rect::from_min_size(hp + Vec2::new(14.0, 6.0), Vec2::new(150.0, 22.0));
+            lp.rect_filled(r, 4.0, ui.visuals().window_fill);
+            lp.rect_stroke(r, 4.0, EStroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+            lp.text(r.left_center() + Vec2::new(6.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), text_col);
+        }
+        if !pdown {
+            if let Some(t) = drop_target.clone() { acts.push(LAct::Move(d.clone(), t)); }
+            cx.st.layer_drag = None;
+        }
+        ctx.request_repaint();
+    }
+    if cx.st.eye_drag.is_some() && !pdown { cx.st.eye_drag = None; }
+    // фон
+    ui.add_space(2.0);
     ui.horizontal(|ui| {
-        let mut c = ed.doc.bg;
-        let mut vis = ed.doc.bg_visible;
-        if ui.color_edit_button_srgb(&mut c).changed() { ed.set_bg(c, vis); }
-        ui.label("Цвет фона");
-        if ui.checkbox(&mut vis, "").on_hover_text("Показывать фон").changed() { let c = ed.doc.bg; ed.set_bg(c, vis); }
+        let mut c = cx.ed.doc.bg;
+        let mut vis = cx.ed.doc.bg_visible;
+        if ui.color_edit_button_srgb(&mut c).changed() { cx.ed.set_bg(c, vis); }
+        ui.label("Фон холста");
+        if ui.checkbox(&mut vis, "").on_hover_text("Показывать фон").changed() { let c = cx.ed.doc.bg; cx.ed.set_bg(c, vis); }
+        ui.label(egui::RichText::new(format!("{} слоёв", cx.ed.doc.layers.iter().filter(|l| !l.group).count())).weak());
     });
     ui.separator();
+    // нижняя панель
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         let s = Vec2::new(26.0, 24.0);
-        if icon_btn(ui, "plus", false, "Новый слой", s).clicked() { ed.layer_add(); }
-        if icon_btn(ui, "vector", false, "Новый векторный слой", s).clicked() { ed.layer_add_vector(); }
-        if icon_btn(ui, "copy", false, "Дублировать", s).clicked() { ed.layer_duplicate(); }
-        if icon_btn(ui, "merge", false, "Объединить с нижним", s).clicked() { ed.merge_down(); }
-        if icon_btn(ui, "trash", false, "Удалить слой", s).clicked() { ed.layer_delete(); }
-        ui.menu_button("Ещё", |ui| {
-            if ui.button("Переименовать…").clicked() { cx.st.layer_rename = Some((li, ed.doc.layer().name.clone())); ui.close_menu(); }
-            if ui.button("Очистить").clicked() { ed.layer_clear(); ui.close_menu(); }
-            if ui.button("Залить основным цветом").clicked() { let c = cx.sh.colors.fg; ed.layer_fill(c); ui.close_menu(); }
-            if ui.button("Выделить по содержимому").clicked() { ed.select_from_layer(); ui.close_menu(); }
-            if ui.button("Отразить по горизонтали").clicked() { ed.layer_flip(true); ui.close_menu(); }
-            if ui.button("Отразить по вертикали").clicked() { ed.layer_flip(false); ui.close_menu(); }
-            if ed.doc.layer().is_vector() && ui.button("Растеризовать").clicked() { ed.layer_rasterize(); ui.close_menu(); }
-            let r = ed.doc.layer().reference;
-            if ui.selectable_label(r, "Референс для заливки").clicked() { ed.layer_props(li, |x| x.reference = !r, "Референс"); ui.close_menu(); }
-            if ui.button("Свести изображение").clicked() { ed.flatten_all(); ui.close_menu(); }
+        if icon_btn(ui, "raster_new", false, "Новый растровый слой (Ctrl+Shift+N)", s).clicked() { acts.push(LAct::Op("new_raster", li)); }
+        if icon_btn(ui, "vector", false, "Новый векторный слой", s).clicked() { acts.push(LAct::Op("new_vector", li)); }
+        if icon_btn(ui, "folder_new", false, "Новая папка (с выбранными слоями — Ctrl+G)", s).clicked() { acts.push(LAct::Op(if nsel > 1 { "group" } else { "new_folder" }, li)); }
+        if icon_btn(ui, "copy", false, "Дублировать (Ctrl+J)", s).clicked() { acts.push(LAct::Op("dup", li)); }
+        if icon_btn(ui, "transfer", false, "Перенести на нижний слой", s).clicked() { acts.push(LAct::Op("transfer", li)); }
+        if icon_btn(ui, "merge", false, if nsel > 1 { "Объединить выбранные" } else { "Объединить с нижним (Ctrl+E)" }, s).clicked() { acts.push(LAct::Op(if nsel > 1 { "merge_sel" } else { "merge_down" }, li)); }
+        if icon_btn(ui, "mask", false, "Создать маску слоя (по выделению)", s).clicked() { acts.push(LAct::Op("mask_add", li)); }
+        if icon_btn(ui, "trash", false, "Удалить", s).clicked() { acts.push(LAct::Op("del", li)); }
+        ui.menu_button("…", |ui| {
+            layer_menu_items(ui, &l, li, nsel, &mut acts);
+            ui.separator();
+            ui.add(egui::Slider::new(&mut cx.sh.prefs.layer_thumb, 28.0..=96.0).text("Миниатюры"));
+            if ui.button("Свести изображение").clicked() { acts.push(LAct::Op("flatten", li)); ui.close_menu(); }
         });
     });
+    for a in acts { apply_lact(cx, a); }
 }
 
+fn apply_lact(cx: &mut Cx, a: LAct) {
+    let ed = &mut *cx.ed;
+    match a {
+        LAct::Select(i) => ed.layer_select(i),
+        LAct::Toggle(i) => ed.layer_select_toggle(i),
+        LAct::Range(i) => ed.layer_select_range(i),
+        LAct::Mask(i) => ed.layer_select_mask(i),
+        LAct::Content(i) => ed.select_layer_content(i),
+        LAct::Vis(i, v) => ed.layer_props(i, |x| x.visible = v, "Видимость слоя"),
+        LAct::Solo(i) => ed.layer_solo(i),
+        LAct::Collapse(i) => { if let Some(l) = ed.doc.layers.get_mut(i) { l.collapsed = !l.collapsed; } ed.mark_changed(); }
+        LAct::Rename(i) => cx.st.layer_rename = Some((i, ed.doc.layers[i].name.clone())),
+        LAct::Move(id, t) => ed.layer_move_to(&id, t),
+        LAct::Tint(i, c) => ed.layer_props(i, |x| x.tint = c, "Цвет слоя"),
+        LAct::Op(k, i) => {
+            let flag = |ed: &mut Editor, f: fn(&mut crate::doc::Layer), name: &str| ed.layer_props(i, f, name);
+            match k {
+                "new_raster" => ed.layer_add(),
+                "new_vector" => ed.layer_add_vector(),
+                "new_folder" => ed.layer_add_folder(),
+                "dup" => ed.layer_duplicate(),
+                "del" => ed.layer_delete(),
+                "rename" => cx.st.layer_rename = Some((i, ed.doc.layers[i].name.clone())),
+                "group" => ed.group_selected(),
+                "ungroup" => ed.ungroup(),
+                "merge_folder" => ed.merge_folder(),
+                "merge_sel" => ed.merge_selected(),
+                "merge_down" => ed.merge_down(),
+                "transfer" => ed.transfer_down(),
+                "merge_visible" => ed.merge_visible_new(),
+                "flatten" => ed.flatten_all(),
+                "mask_add" => ed.mask_add(),
+                "mask_apply" => ed.mask_apply(),
+                "mask_del" => ed.mask_delete(),
+                "mask_inv" => ed.mask_invert(),
+                "mask_toggle" => flag(ed, |x| x.mask_on = !x.mask_on, "Маска слоя"),
+                "pass" => flag(ed, |x| x.pass = !x.pass, "Режим папки"),
+                "clip" => flag(ed, |x| x.clip = !x.clip, "Обтравочная маска"),
+                "ref" => flag(ed, |x| x.reference = !x.reference, "Референсный слой"),
+                "draft" => flag(ed, |x| x.draft = !x.draft, "Черновой слой"),
+                "lock" => flag(ed, |x| x.locked = !x.locked, "Закрепить слой"),
+                "alock" => flag(ed, |x| x.alpha_lock = !x.alpha_lock, "Защита прозрачности"),
+                "content" => ed.select_layer_content(i),
+                "rasterize" => ed.layer_rasterize(),
+                "flip_h" => ed.layer_flip(true),
+                "flip_v" => ed.layer_flip(false),
+                "clear" => ed.layer_clear(),
+                _ => {}
+            }
+        }
+    }
+}
 fn history_panel(ui: &mut Ui, cx: &mut Cx) {
     let ed = &mut *cx.ed;
     let mut goto = None;
@@ -1044,23 +1335,38 @@ fn panel_by(ui: &mut Ui, cx: &mut Cx, group: usize, tab: usize) {
 fn dock(ui: &mut Ui, cx: &mut Cx) {
     let total = ui.available_height();
     let tabs = [["Цвет", "Образцы"], ["Кисти", "Настройки кисти"], ["Слои", "История"]];
-    let heights = [total * 0.36, total * 0.30, total * 0.34];
+    // повторный щелчок по активной вкладке сворачивает группу; место делят развёрнутые
+    let weights = [0.30f32, 0.28, 0.42];
+    let open: Vec<usize> = (0..3).filter(|g| !cx.st.dock_collapsed[*g]).collect();
+    let header = 34.0;
+    let free = (total - header * 3.0).max(60.0);
+    let wsum: f32 = open.iter().map(|&g| weights[g]).sum::<f32>().max(0.01);
     for g in 0..3 {
         ui.horizontal(|ui| {
             for (t, n) in tabs[g].iter().enumerate() {
-                if ui.selectable_label(cx.st.dock_tab[g] == t, egui::RichText::new(*n).strong()).clicked() { cx.st.dock_tab[g] = t; }
+                let sel = cx.st.dock_tab[g] == t && !cx.st.dock_collapsed[g];
+                if ui.selectable_label(sel, egui::RichText::new(*n).strong()).on_hover_text("Щёлкните ещё раз, чтобы свернуть").clicked() {
+                    if cx.st.dock_tab[g] == t { cx.st.dock_collapsed[g] = !cx.st.dock_collapsed[g]; } else { cx.st.dock_tab[g] = t; cx.st.dock_collapsed[g] = false; }
+                }
+            }
+            if cx.st.dock_collapsed[g] {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(egui::RichText::new("свёрнуто").weak().size(11.0)); });
             }
         });
         ui.separator();
-        let h = heights[g] - 34.0;
-        egui::ScrollArea::vertical().id_salt(("dock", g)).max_height(h).min_scrolled_height(h).auto_shrink([false, false]).show(ui, |ui| {
-            let t = cx.st.dock_tab[g];
-            panel_by(ui, cx, g, t);
-        });
+        if cx.st.dock_collapsed[g] { continue; }
+        let h = (free * weights[g] / wsum).max(60.0);
+        let t = cx.st.dock_tab[g];
+        if g == 2 && t == 0 {
+            ui.allocate_ui(Vec2::new(ui.available_width(), h), |ui| { ui.set_min_height(h); ui.set_max_height(h); layers_panel(ui, cx); });
+        } else {
+            egui::ScrollArea::vertical().id_salt(("dock", g)).max_height(h).min_scrolled_height(h).auto_shrink([false, false]).show(ui, |ui| {
+                panel_by(ui, cx, g, t);
+            });
+        }
         ui.separator();
     }
 }
-
 fn status_bar(ui: &mut Ui, cx: &mut Cx) {
     let ed = &mut *cx.ed;
     ui.horizontal(|ui| {
@@ -1160,7 +1466,7 @@ impl App {
                     for (title, g, t) in wins {
                         let mut open = match (g, t) { (0, _) => cx.st.win.color, (1, 0) => cx.st.win.brushes, (1, _) => cx.st.win.brushset, (2, 0) => cx.st.win.layers, _ => cx.st.win.history };
                         if !open { continue; }
-                        egui::Window::new(title).open(&mut open).default_width(320.0).max_height(ctx2.screen_rect().height() * 0.7).vscroll(true).show(&ctx2, |ui| panel_by(ui, &mut cx, g, t));
+                        egui::Window::new(title).open(&mut open).default_width(320.0).max_height(ctx2.screen_rect().height() * 0.7).vscroll(!(g == 2 && t == 0)).show(&ctx2, |ui| panel_by(ui, &mut cx, g, t));
                         match (g, t) { (0, _) => cx.st.win.color = open, (1, 0) => cx.st.win.brushes = open, (1, _) => cx.st.win.brushset = open, (2, 0) => cx.st.win.layers = open, _ => cx.st.win.history = open }
                     }
                     if cx.st.win.menu {
@@ -1493,6 +1799,9 @@ const HELP: &[(&str, &str)] = &[
     ("Пробел + перетаскивание", "Сдвиг холста"), ("Колесо мыши", "Масштаб"), ("Alt или правая кнопка", "Пипетка"), ("Ctrl+0 / Ctrl+1 / F", "Вписать / 100% / Зеркальный вид"),
     ("Ctrl+C / Ctrl+X / Ctrl+V", "Копировать / вырезать / вставить (в том числе картинки из других программ)"), ("Ctrl+Shift+S", "Сохранить как… (выбор папки)"),
     ("Перетаскивание файлов в окно", "Картинки, проекты, кисти .abr/.sut, палитры"), ("Alt + колесо мыши", "Размер кисти"), ("1 … 9, 0", "Непрозрачность 10…100 %"),
+    ("Ctrl+G / Ctrl+Shift+G", "Объединить в папку / расформировать папку"), ("Ctrl+] / Ctrl+[", "Переместить слой выше / ниже"), ("Alt+] / Alt+[", "Выбрать слой выше / ниже"),
+    ("Ctrl+щелчок / Shift+щелчок по слою", "Выбрать несколько слоёв"), ("Ctrl+щелчок по миниатюре", "Выделить по содержимому слоя"), ("Alt+щелчок по глазу", "Показать только этот слой"),
+    ("Перетаскивание по глазкам", "Скрыть или показать сразу несколько слоёв"), ("Перетаскивание слоя", "Изменить порядок, положить в папку"),
     ("Tab", "Скрыть панели"), ("Удержание пера", "Пипетка"), ("Задержка в конце штриха", "Быстрая фигура: линия, круг, многоугольник"),
     ("2 пальца — касание", "Отменить"), ("3 пальца — касание", "Повторить"), ("2 пальца — движение", "Сдвиг, масштаб, поворот"), ("4 пальца — касание", "Скрыть панели"),
 ];

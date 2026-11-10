@@ -209,6 +209,11 @@ impl AutoTest {
         s.push_back(run(Box::new(|a, _| { a.ui.dock_tab[0] = 1; a.ui.dock_tab[1] = 0; a.ui.brush_cat = "imported".into(); })));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("08-palettes-imported-brushes.png"));
+        s.push_back(run(Box::new(|a, l| layers_test(a, l))));
+        s.push_back(run(Box::new(|a, _| { a.ui.dock_tab[2] = 0; a.ui.dock_collapsed = [false, true, false]; a.sh.prefs.layer_thumb = 48.0; })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("09-layers-panel.png"));
+        s.push_back(run(Box::new(|a, l| { a.ui.dock_collapsed = [false; 3]; layers_test2(a, l) })));
         s.push_back(run(Box::new(|a, _| {
             // стабилизатор: дрожащая линия
             a.sh.prefs.stabilizer = 0.5;
@@ -225,13 +230,13 @@ impl AutoTest {
             a.ui.new_canvas = Some(crate::ui::NewCanvas::default());
         })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("09-new-canvas.png"));
+        s.push_back(Step::Shot("10-new-canvas.png"));
         s.push_back(run(Box::new(|a, _| { a.ui.new_canvas = None; a.ui.settings = true; })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("10-settings.png"));
+        s.push_back(Step::Shot("11-settings.png"));
         s.push_back(run(Box::new(|a, _| { a.ui.settings = false; a.sh.prefs.light = true; })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("11-light.png"));
+        s.push_back(Step::Shot("12-light.png"));
         s.push_back(run(Box::new(|a, _| { a.sh.prefs.light = false; })));
         s.push_back(Step::Quit);
         Some(AutoTest { dir, steps: s, stroke: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
@@ -240,6 +245,8 @@ impl AutoTest {
     /// Вызывается перед кадром: подмешивает события мыши.
     pub fn input(app: &mut App, raw: &mut RawInput) {
         let Some(t) = app.test.as_mut() else { return };
+        // настоящая мышь не должна вмешиваться в программные штрихи (если курсор оказался над окном)
+        raw.events.retain(|e| !matches!(e, Event::PointerMoved(_) | Event::MouseMoved(_) | Event::PointerButton { .. } | Event::Touch { .. } | Event::PointerGone | Event::MouseWheel { .. }));
         let rect = app.ed.as_ref().map(|e| e.canvas_rect);
         let to = |p: (f32, f32)| rect.map_or(Pos2::ZERO, |r| Pos2::new(r.left() + r.width() * p.0, r.top() + r.height() * p.1));
         if let Some((pts, i)) = &mut t.stroke {
@@ -553,4 +560,124 @@ fn import_test(a: &mut App, l: &mut AutoLog) {
     let np = a.sh.palettes.len();
     a.handle_open(crate::app::Purpose::Palette, vec![("Море.gpl".into(), gpl), ("Закат.ase".into(), ase)]);
     l.check(a.sh.palettes.len() == np + 2 && a.sh.palettes.iter().any(|p| p.name == "Море" && p.colors.len() == 3), "импорт палитр GIMP (.gpl) и Adobe (.ase)");
+}
+
+fn blue(p: [u8; 4]) -> bool {
+    p[2] > 180 && p[0] < 100 && p[1] < 120
+}
+
+fn flat_px(d: &crate::doc::Document, x: usize, y: usize, export: bool) -> [u8; 4] {
+    let f = if export { doc::flatten_export(d, true) } else { doc::flatten(d, true) };
+    let i = f.idx(x, y);
+    [f.px[i], f.px[i + 1], f.px[i + 2], f.px[i + 3]]
+}
+
+fn fill_rect(ed: &mut crate::editor::Editor, x0: usize, y0: usize, x1: usize, y1: usize, c: [u8; 3]) {
+    let li = ed.doc.active;
+    let img = ed.doc.layers[li].img_mut();
+    for y in y0..y1 { for x in x0..x1 { let i = img.idx(x, y); img.px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]); } }
+    ed.invalidate_all();
+}
+
+static LT_IDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Папки, выбор нескольких слоёв, маска, перенос, сохранение.
+fn layers_test(a: &mut App, l: &mut AutoLog) {
+    use crate::editor::Drop;
+    let ed = a.ed.as_mut().unwrap();
+    ed.set_tool(Tool::Brush);
+    ed.layer_add();
+    fill_rect(ed, 0, 0, 200, 150, [30, 60, 220]);
+    let l1 = ed.doc.layer().id.clone();
+    ed.layer_add();
+    fill_rect(ed, 1400, 0, 1600, 150, [40, 200, 60]);
+    let l2 = ed.doc.layer().id.clone();
+    let i1 = ed.doc.find(&l1).unwrap();
+    ed.layer_select_toggle(i1);
+    l.check(ed.selected().len() == 2, "выбраны два слоя (Ctrl+щелчок)");
+    ed.group_selected();
+    let gi = ed.doc.active;
+    let gid = ed.doc.layers[gi].id.clone();
+    let (k1, k2) = (ed.doc.find(&l1).unwrap(), ed.doc.find(&l2).unwrap());
+    let inside = ed.doc.layers[gi].group && ed.doc.layers[k1].parent.as_deref() == Some(gid.as_str()) && ed.doc.layers[k2].parent.as_deref() == Some(gid.as_str()) && k1 < gi && k2 < gi;
+    l.check(inside, "Ctrl+G: оба слоя в новой папке");
+    l.check(blue(flat_px(&ed.doc, 100, 75, false)), "содержимое папки видно на холсте");
+    ed.layer_props(gi, |x| x.visible = false, "Видимость");
+    let hidden = flat_px(&ed.doc, 100, 75, false);
+    l.check(!blue(hidden), format!("скрытая папка прячет свои слои {hidden:?}"));
+    ed.layer_props(gi, |x| x.visible = true, "Видимость");
+    // маска: стираем часть слоя по выделению
+    let k1 = ed.doc.find(&l1).unwrap();
+    ed.layer_select(k1);
+    ed.mask_add();
+    let (w, h) = (ed.doc.w, ed.doc.h);
+    let mut m = vec![0u8; w * h];
+    for y in 0..150 { for x in 0..100 { m[y * w + x] = 255; } }
+    ed.apply_selection(m, crate::editor::SelOp::Replace, None, "Выделение");
+    ed.layer_clear();
+    ed.select_none();
+    let (p_hid, p_vis) = (flat_px(&ed.doc, 50, 75, false), flat_px(&ed.doc, 150, 75, false));
+    l.check(ed.doc.layer().mask.is_some() && !blue(p_hid) && blue(p_vis), format!("маска скрывает часть слоя ({p_hid:?} / {p_vis:?})"));
+    l.check(ed.doc.layer().img.px[ed.doc.layer().img.idx(50, 75) + 3] == 255, "пиксели слоя под маской не тронуты");
+    ed.undo(); ed.undo();
+    let back = flat_px(&ed.doc, 50, 75, false);
+    ed.redo(); ed.redo();
+    let again = flat_px(&ed.doc, 50, 75, false);
+    l.check(blue(back) && !blue(again), "отмена и повтор рисования по маске");
+    // перетаскивание: второй слой — из папки наверх
+    ed.layer_move_to(&l2, Drop::Above(gid.clone()));
+    let k2 = ed.doc.find(&l2).unwrap();
+    let gi = ed.doc.find(&gid).unwrap();
+    l.check(ed.doc.layers[k2].parent.is_none() && k2 == gi + 1, "слой перетащен из папки над ней");
+    ed.layer_move_to(&l2, Drop::Into(gid.clone()));
+    let k2 = ed.doc.find(&l2).unwrap();
+    l.check(ed.doc.layers[k2].parent.as_deref() == Some(gid.as_str()), "слой перетащен обратно в папку");
+    // черновой слой не попадает в экспорт
+    ed.layer_props(k2, |x| x.draft = true, "Черновой");
+    let (seen, exported) = (flat_px(&ed.doc, 1500, 75, false), flat_px(&ed.doc, 1500, 75, true));
+    l.check(seen[1] > 150 && exported[1] < 150 || exported[0] > 150, format!("черновой слой виден, но не экспортируется ({seen:?} / {exported:?})"));
+    ed.layer_props(k2, |x| x.draft = false, "Черновой");
+    // сохранение
+    let before = doc::flatten(&ed.doc, true);
+    let mz = formats::save_mazok(&ed.doc);
+    match formats::load_mazok(&mz) {
+        Ok(d) => {
+            let ok = d.layers.iter().any(|x| x.group && x.id == gid) && d.layers.iter().any(|x| x.id == l1 && x.mask.is_some() && x.parent.as_deref() == Some(gid.as_str()));
+            l.check(ok && hash(&doc::flatten(&d, true)) == hash(&before), ".mazok сохраняет папки и маски пиксель в пиксель");
+        }
+        Err(e) => l.check(false, format!(".mazok: {e}")),
+    }
+    match formats::import(&formats::psd_write(&ed.doc), "t.psd") {
+        Ok(d) => {
+            let groups = d.layers.iter().filter(|x| x.group).count();
+            let kids = d.layers.iter().filter(|x| x.parent.is_some()).count();
+            let diff = doc::flatten(&d, true).px.iter().zip(&before.px).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap_or(255);
+            l.check(groups == 1 && kids == 2 && diff <= 3, format!("PSD: папки — группами Photoshop ({groups} папка, {kids} слоя внутри, расхождение {diff})"));
+        }
+        Err(e) => l.check(false, format!("PSD: {e}")),
+    }
+    let k1 = ed.doc.find(&l1).unwrap();
+    ed.layer_select(k1);
+    *LT_IDS.lock().unwrap() = vec![l1, l2, gid];
+}
+
+fn layers_test2(a: &mut App, l: &mut AutoLog) {
+    let ids = LT_IDS.lock().unwrap().clone();
+    let ed = a.ed.as_mut().unwrap();
+    let Some(gi) = ids.get(2).and_then(|g| ed.doc.find(g)) else { l.check(false, "папка из теста пропала"); return };
+    // сдвиг клавишами Ctrl+[ / Ctrl+]
+    let k1 = ed.doc.find(&ids[0]).unwrap();
+    ed.layer_select(k1);
+    ed.layer_step(true);
+    let up = ed.doc.find(&ids[0]).unwrap();
+    l.check(up > k1 && ed.doc.layers[up].parent.as_deref() == Some(ids[2].as_str()), "слой сдвинут выше внутри папки");
+    ed.layer_select(ed.doc.find(&ids[2]).unwrap());
+    let n = ed.doc.layers.len();
+    ed.merge_folder();
+    let merged = ed.doc.layer();
+    let px = flat_px(&ed.doc, 150, 75, false);
+    l.check(!merged.group && ed.doc.layers.len() == n - 2 && blue(px) && !blue(flat_px(&ed.doc, 50, 75, false)), "папка объединена в один слой с учётом маски");
+    ed.undo();
+    l.check(ed.doc.find(&ids[2]).map_or(false, |g| ed.doc.layers[g].group), "отмена объединения вернула папку");
+    let _ = gi;
 }

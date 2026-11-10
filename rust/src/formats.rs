@@ -167,8 +167,16 @@ pub struct LayerMeta {
     pub locked: bool,
     pub reference: bool,
     pub text: Option<TextSpec>,
-    /// "vector" — векторный слой (штрихи в layers/<id>.vec.json).
+    /// "vector" — векторный слой (штрихи в layers/<id>.vec.json), "group" — папка.
     pub kind: Option<String>,
+    pub parent: Option<String>,
+    pub collapsed: bool,
+    pub pass: Option<bool>,
+    /// Маска в layers/<id>.mask.png.
+    pub mask: bool,
+    pub mask_on: Option<bool>,
+    pub draft: bool,
+    pub tint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -222,7 +230,14 @@ pub fn meta(doc: &Document) -> DocMeta {
             locked: l.locked,
             reference: l.reference,
             text: l.text.clone(),
-            kind: if l.is_vector() { Some("vector".into()) } else { None },
+            kind: if l.group { Some("group".into()) } else if l.is_vector() { Some("vector".into()) } else { None },
+            parent: l.parent.clone(),
+            collapsed: l.collapsed,
+            pass: if l.group { Some(l.pass) } else { None },
+            mask: l.mask.is_some(),
+            mask_on: if l.mask.is_some() { Some(l.mask_on) } else { None },
+            draft: l.draft,
+            tint: l.tint.map(hex),
         }).collect(),
         format: "mazok".into(),
         version: 1,
@@ -235,7 +250,9 @@ pub fn save_mazok(doc: &Document) -> Vec<u8> {
     let mut files = vec![("doc.json".to_string(), serde_json::to_vec(&meta(doc)).unwrap_or_default())];
     let pngs: Vec<(String, Vec<u8>)> = {
         use rayon::prelude::*;
-        doc.layers.par_iter().map(|l| (format!("layers/{}.png", l.id), png(&l.img))).collect()
+        let mut v: Vec<(String, Vec<u8>)> = doc.layers.par_iter().filter(|l| !l.group).map(|l| (format!("layers/{}.png", l.id), png(&l.img))).collect();
+        v.extend(doc.layers.par_iter().filter_map(|l| l.mask.as_ref().map(|m| (format!("layers/{}.mask.png", l.id), png(m)))).collect::<Vec<_>>());
+        v
     };
     files.extend(pngs);
     for l in doc.layers.iter() {
@@ -277,11 +294,28 @@ pub fn load_mazok(bytes: &[u8]) -> Result<Document, String> {
         l.locked = lm.locked;
         l.reference = lm.reference;
         l.text = lm.text.clone();
+        l.parent = lm.parent.clone();
+        l.collapsed = lm.collapsed;
+        l.draft = lm.draft;
+        l.tint = lm.tint.as_deref().and_then(parse_hex);
+        if lm.kind.as_deref() == Some("group") {
+            l.group = true;
+            l.pass = lm.pass.unwrap_or(true);
+            l.img = Arc::new(Img::new(0, 0));
+        }
+        if lm.mask {
+            if let Some(img) = z.get(&format!("layers/{}.mask.png", lm.id)).and_then(|p| decode_image(p).ok()) {
+                let mut full = Img::new(m.w, m.h);
+                full.put(0, 0, &img);
+                l.mask = Some(Arc::new(full));
+                l.mask_on = lm.mask_on.unwrap_or(true);
+            }
+        }
         if lm.kind.as_deref() == Some("vector") {
             let v = z.get(&format!("layers/{}.vec.json", lm.id)).and_then(|b| crate::vector::from_json(b)).unwrap_or_default();
             l.vector = Some(Arc::new(v));
         }
-        if let Some(p) = z.get(&format!("layers/{}.png", lm.id)) {
+        if let Some(p) = z.get(&format!("layers/{}.png", lm.id)).filter(|_| !l.group) {
             if let Ok(img) = decode_image(p) {
                 let mut full = Img::new(m.w, m.h);
                 full.put(0, 0, &img);
@@ -290,6 +324,7 @@ pub fn load_mazok(bytes: &[u8]) -> Result<Document, String> {
         }
         d.layers.push(l);
     }
+    doc::normalize(&mut d.layers);
     if d.layers.is_empty() {
         let n = d.next_name();
         d.layers.push(Layer::new(m.w, m.h, &n));
@@ -319,20 +354,38 @@ pub fn psd_write(doc: &Document) -> Vec<u8> {
     o.s("8BPS"); o.u16(1); o.z(6); o.u16(3); o.u32(h as u32); o.u32(w as u32); o.u16(8); o.u16(3);
     o.u32(0); o.u32(0);
     let mut li = W(Vec::new());
-    let mut layers: Vec<Layer> = doc.layers.clone();
+    // Записи PSD снизу вверх: папка = «</Layer group>» (lsct 3), содержимое, запись папки (lsct 1/2).
+    struct PRec { img: Option<Img>, blend: &'static str, opacity: f32, clip: bool, flags: u8, name: String, sect: u32 }
+    let mut recs: Vec<PRec> = vec![];
     if doc.bg_visible {
-        let mut bg = Layer::new(w, h, "Фон");
-        bg.img = Arc::new(Img::filled(w, h, [doc.bg[0], doc.bg[1], doc.bg[2], 255]));
-        layers.insert(0, bg);
+        recs.push(PRec { img: Some(Img::filled(w, h, [doc.bg[0], doc.bg[1], doc.bg[2], 255])), blend: "norm", opacity: 1.0, clip: false, flags: 0, name: "Фон".into(), sect: 0 });
     }
-    li.i16(layers.len() as i16);
+    let ls = &doc.layers;
+    for (k, l) in ls.iter().enumerate() {
+        // открываем папки, содержимое которых начинается здесь (внешние раньше внутренних)
+        let mut opening: Vec<usize> = (k..ls.len()).filter(|&g| ls[g].group && g > k && doc::group_start(ls, g) == k).collect();
+        opening.sort_by_key(|&g| doc::depth(ls, g));
+        for _ in opening {
+            recs.push(PRec { img: None, blend: "norm", opacity: 1.0, clip: false, flags: 0, name: "</Layer group>".into(), sect: 3 });
+        }
+        let flags = (l.alpha_lock as u8) | if l.visible { 0 } else { 2 };
+        if l.group {
+            if doc::group_start(ls, k) == k {
+                recs.push(PRec { img: None, blend: "norm", opacity: 1.0, clip: false, flags: 0, name: "</Layer group>".into(), sect: 3 });
+            }
+            recs.push(PRec { img: None, blend: if l.pass { "pass" } else { l.blend.psd_key() }, opacity: l.opacity, clip: l.clip, flags, name: l.name.clone(), sect: if l.collapsed { 2 } else { 1 } });
+        } else {
+            recs.push(PRec { img: Some(l.baked()), blend: l.blend.psd_key(), opacity: l.opacity, clip: l.clip, flags, name: l.name.clone(), sect: 0 });
+        }
+    }
+    li.i16(recs.len() as i16);
     let mut planes_all = vec![];
-    for l in &layers {
-        let b = l.img.content_bounds().unwrap_or(crate::util::Rect::new(0, 0, 0, 0));
+    for r in &recs {
+        let b = r.img.as_ref().and_then(|i| i.content_bounds()).unwrap_or(crate::util::Rect::new(0, 0, 0, 0));
         li.i32(b.y); li.i32(b.x); li.i32(b.bottom()); li.i32(b.right()); li.u16(4);
         let mut planes: Option<[Vec<u8>; 4]> = None;
-        if b.w > 0 && b.h > 0 {
-            let c = l.img.crop(b).to_straight();
+        if let (Some(img), true) = (&r.img, b.w > 0 && b.h > 0) {
+            let c = img.crop(b).to_straight();
             let n = (b.w * b.h) as usize;
             let mut p = [vec![0u8; n], vec![0u8; n], vec![0u8; n], vec![0u8; n]];
             for i in 0..n {
@@ -348,22 +401,25 @@ pub fn psd_write(doc: &Document) -> Vec<u8> {
             li.i16(*id);
             li.u32(planes.as_ref().map_or(2, |p| p[k].len()) as u32);
         }
-        li.s("8BIM"); li.s(l.blend.psd_key()); li.u8((l.opacity * 255.0).round() as u8); li.u8(l.clip as u8);
-        li.u8((l.alpha_lock as u8) | if l.visible { 0 } else { 2 }); li.u8(0);
+        li.s("8BIM"); li.s(r.blend); li.u8((r.opacity * 255.0).round() as u8); li.u8(r.clip as u8);
+        li.u8(r.flags); li.u8(0);
         let mut ex = W(Vec::new());
         ex.u32(0); ex.u32(0);
-        let nm: String = l.name.chars().map(|c| if c.is_ascii() { c } else { '_' }).take(255).collect();
+        let nm: String = r.name.chars().map(|c| if c.is_ascii() { c } else { '_' }).take(255).collect();
         ex.u8(nm.len() as u8); ex.s(&nm); ex.z((4 - ((1 + nm.len()) % 4)) % 4);
-        let u: Vec<u16> = l.name.encode_utf16().collect();
+        let u: Vec<u16> = r.name.encode_utf16().collect();
         let dl = 4 + u.len() * 2;
         let pl = dl + if dl % 4 != 0 { 4 - dl % 4 } else { 0 };
         ex.s("8BIM"); ex.s("luni"); ex.u32(pl as u32); ex.u32(u.len() as u32);
         for c in &u { ex.u16(*c); }
         ex.z(pl - dl);
+        if r.sect != 0 {
+            ex.s("8BIM"); ex.s("lsct");
+            if r.sect == 3 { ex.u32(4); ex.u32(3); } else { ex.u32(12); ex.u32(r.sect); ex.s("8BIM"); ex.s(r.blend); }
+        }
         li.u32(ex.0.len() as u32); li.b(&ex.0);
         planes_all.push(planes);
-    }
-    for p in &planes_all {
+    }    for p in &planes_all {
         for k in 0..4 {
             match p {
                 Some(p) => li.b(&p[k]),
@@ -373,7 +429,7 @@ pub fn psd_write(doc: &Document) -> Vec<u8> {
     }
     if li.0.len() % 2 == 1 { li.u8(0); }
     o.u32((4 + li.0.len() + 4) as u32); o.u32(li.0.len() as u32); o.b(&li.0); o.u32(0);
-    let flat = doc::flatten(doc, true).to_straight();
+    let flat = doc::flatten_export(doc, true).to_straight();
     o.u16(1);
     let mut rows: Vec<Vec<u8>> = Vec::with_capacity(h * 3);
     for c in 0..3 {
@@ -487,7 +543,7 @@ pub fn psd_read(d: &[u8], name: &str) -> Result<Document, String> {
         if li_len > 0 {
             need!(2);
             let count = rd_i16(&mut o).unsigned_abs() as usize;
-            struct Rec { top: i32, left: i32, bottom: i32, right: i32, chans: Vec<(i16, usize)>, key: String, opacity: u8, clip: u8, flags: u8, name: String, divider: bool }
+            struct Rec { top: i32, left: i32, bottom: i32, right: i32, chans: Vec<(i16, usize)>, key: String, opacity: u8, clip: u8, flags: u8, name: String, sect: u32 }
             let mut recs = vec![];
             for _ in 0..count {
                 need!(18);
@@ -509,7 +565,7 @@ pub fn psd_read(d: &[u8], name: &str) -> Result<Document, String> {
                 need!(nl);
                 let mut nm = String::from_utf8_lossy(&d[o..o + nl]).to_string();
                 o += nl + (4 - ((1 + nl) % 4)) % 4;
-                let mut divider = false;
+                let mut sect = 0u32;
                 while o + 12 <= ex_end {
                     let sig = &d[o..o + 4];
                     if sig != b"8BIM" && sig != b"8B64" { break; }
@@ -525,13 +581,14 @@ pub fn psd_read(d: &[u8], name: &str) -> Result<Document, String> {
                     }
                     if (k == "lsct" || k == "lsdk") && o + 4 <= d.len() {
                         let tp = rd_u32(&mut o);
-                        if (1..=3).contains(&tp) { divider = true; }
+                        if (1..=3).contains(&tp) { sect = tp as u32; }
                     }
                     o = ds + l;
                 }
                 o = ex_end;
-                recs.push(Rec { top, left, bottom, right, chans, key, opacity, clip, flags, name: nm, divider });
+                recs.push(Rec { top, left, bottom, right, chans, key, opacity, clip, flags, name: nm, sect });
             }
+            let mut stack: Vec<String> = vec![];
             for r in recs {
                 let cw = (r.right - r.left).max(0) as usize;
                 let chh = (r.bottom - r.top).max(0) as usize;
@@ -543,8 +600,22 @@ pub fn psd_read(d: &[u8], name: &str) -> Result<Document, String> {
                     }
                     o = s + len;
                 }
-                if r.divider { continue; }
+                if r.sect == 3 { stack.push(util::uid()); continue; }
+                if r.sect == 1 || r.sect == 2 {
+                    let mut g = Layer::new_group(if r.name.is_empty() { "Папка" } else { &r.name });
+                    if let Some(id) = stack.pop() { g.id = id; }
+                    g.parent = stack.last().cloned();
+                    g.opacity = r.opacity as f32 / 255.0;
+                    g.visible = r.flags & 2 == 0;
+                    g.collapsed = r.sect == 2;
+                    g.clip = r.clip == 1;
+                    g.pass = r.key == "pass";
+                    if !g.pass { g.blend = Blend::from_psd(&r.key); }
+                    doc.layers.push(g);
+                    continue;
+                }
                 let mut l = Layer::new(w, h, if r.name.is_empty() { "Слой" } else { &r.name });
+                l.parent = stack.last().cloned();
                 l.opacity = r.opacity as f32 / 255.0;
                 l.blend = Blend::from_psd(&r.key);
                 l.clip = r.clip == 1;
@@ -607,6 +678,7 @@ pub fn psd_read(d: &[u8], name: &str) -> Result<Document, String> {
         l.img = Arc::new(Img::from_straight(w, h, &rgba));
         doc.layers.push(l);
     }
+    doc::normalize(&mut doc.layers);
     doc.layer_seq = doc.layers.len() as u32 + 1;
     doc.active = doc.layers.len() - 1;
     Ok(doc)

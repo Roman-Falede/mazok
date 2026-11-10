@@ -536,20 +536,20 @@ impl App {
         let d = &ed.doc;
         let base = safe_name(&d.name);
         let out: Result<(String, &str, Vec<u8>), String> = match kind {
-            "png" => Ok((format!("{base}.png"), "image/png", formats::png(&doc::flatten(d, true)))),
-            "jpeg" => Ok((format!("{base}.jpg"), "image/jpeg", formats::jpeg(&doc::flatten(d, true), [255, 255, 255]))),
+            "png" => Ok((format!("{base}.png"), "image/png", formats::png(&doc::flatten_export(d, true)))),
+            "jpeg" => Ok((format!("{base}.jpg"), "image/jpeg", formats::jpeg(&doc::flatten_export(d, true), [255, 255, 255]))),
             "psd" => Ok((format!("{base}.psd"), "image/vnd.adobe.photoshop", formats::psd_write(d))),
             "mazok" => Ok((format!("{base}.mazok"), "application/zip", formats::save_mazok(d))),
             "layers" => {
-                let files: Vec<(String, Vec<u8>)> = d.layers.iter().enumerate().map(|(i, l)| (format!("{:02} {}.png", i + 1, safe_name(&l.name)), formats::png(&l.img))).collect();
+                let files: Vec<(String, Vec<u8>)> = d.layers.iter().filter(|l| !l.group).enumerate().map(|(i, l)| (format!("{:02} {}.png", i + 1, safe_name(&l.name)), formats::png(&l.baked()))).collect();
                 Ok((format!("{base} — слои.zip"), "application/zip", formats::zip_write(&files)))
             }
             "gif" => {
                 let k = (720.0 / d.w.max(d.h) as f32).min(1.0);
                 let (w, h) = (((d.w as f32 * k) as usize).max(1), ((d.h as f32 * k) as usize).max(1));
-                let frames: Vec<Img> = d.layers.iter().map(|l| {
+                let frames: Vec<Img> = d.layers.iter().filter(|l| !l.group && !l.draft).map(|l| {
                     let mut f = if d.bg_visible { Img::filled(d.w, d.h, [d.bg[0], d.bg[1], d.bg[2], 255]) } else { Img::new(d.w, d.h) };
-                    if l.visible { f.draw_over(0, 0, &l.img, l.opacity); }
+                    if l.visible { f.draw_over(0, 0, &l.baked(), l.opacity); }
                     f.resize(w, h)
                 }).collect();
                 formats::gif(&frames, 12).map(|b| (format!("{base}.gif"), "image/gif", b))
@@ -601,6 +601,13 @@ impl App {
             "redo" => ed.redo(),
             "layer_new" => ed.layer_add(),
             "layer_new_vector" => ed.layer_add_vector(),
+            "layer_folder" => ed.layer_add_folder(),
+            "group" => ed.group_selected(),
+            "ungroup" => ed.ungroup(),
+            "layer_up" => ed.layer_step(true),
+            "layer_down" => ed.layer_step(false),
+            "layer_sel_up" => ed.layer_select_step(true),
+            "layer_sel_down" => ed.layer_select_step(false),
             "rasterize" => ed.layer_rasterize(),
             "sel_all" => ed.select_all(),
             "sel_none" => ed.select_none(),

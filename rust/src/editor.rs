@@ -37,6 +37,10 @@ pub enum SelOp { Replace, Add, Subtract, Intersect }
 pub enum GradKind { Linear, Radial, Reflected, Angle }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShapeKind { Rect, Ellipse, Line, Polygon, Star }
+/// Куда перетащить слой.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Drop { Above(String), Below(String), Into(String) }
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PaintMode { Paint, Erase, Smudge, Clone }
 
@@ -96,6 +100,8 @@ impl View {
 pub struct Work {
     pub layer: usize,
     pub img: Img,
+    /// Рабочая копия — маска слоя, а не его пиксели.
+    pub mask: bool,
 }
 
 struct Pick {
@@ -147,6 +153,7 @@ pub struct XState {
 
 pub struct Xform {
     pub layer: usize,
+    on_mask: bool,
     float: Img,
     hole: Img,
     orig: Arc<Img>,
@@ -160,6 +167,7 @@ pub struct Xform {
 
 pub struct FilterSession {
     pub id: &'static str,
+    pub mask: bool,
     pub params: Vec<f32>,
     pub layer: usize,
     src: Arc<Img>,
@@ -224,6 +232,10 @@ pub struct Editor {
     pub space: bool,
     pub ui_hidden: bool,
     fill_expand: usize,
+    /// Рисуем по маске активного слоя.
+    pub mask_edit: bool,
+    /// Дополнительно выбранные слои (id), кроме активного.
+    pub multi: Vec<String>,
 }
 
 /* ---------- приёмники отпечатков ---------- */
@@ -509,6 +521,8 @@ impl Editor {
             space: false,
             ui_hidden: false,
             fill_expand: 1,
+            mask_edit: false,
+            multi: vec![],
             doc,
         };
         e.invalidate_all();
@@ -544,7 +558,7 @@ impl Editor {
 
     fn refresh(&mut self, ctx: &egui::Context) {
         if let Some(r) = self.comp_dirty.take() {
-            let ov = self.work.as_ref().map(|w| (w.layer, &w.img));
+            let ov = self.work.as_ref().map(|w| doc::Ov { layer: w.layer, img: &w.img, mask: w.mask });
             doc::render(&self.doc, &mut self.comp, r, ov);
             self.tex_dirty = util::union_opt(self.tex_dirty, r);
         }
@@ -1149,10 +1163,11 @@ impl Editor {
     /* ---------- кисть ---------- */
 
     fn check_layer(&mut self) -> bool {
-        let l = self.doc.layer();
-        if !l.visible { self.toast("Слой скрыт"); return false; }
-        if l.locked { self.toast("Слой заблокирован"); return false; }
-        if l.text.is_some() {
+        let li = self.doc.active;
+        if self.doc.layers[li].group { self.toast("Выбрана папка — выберите слой внутри неё"); return false; }
+        if !doc::shown(&self.doc.layers, li) { self.toast(if self.doc.layers[li].visible { "Слой в скрытой папке" } else { "Слой скрыт" }); return false; }
+        if doc::locked(&self.doc.layers, li) { self.toast("Слой заблокирован"); return false; }
+        if self.doc.layers[li].text.is_some() && !self.editing_mask() {
             let li = self.doc.active;
             let id = self.doc.layers[li].id.clone();
             let before = self.doc.layers[li].text.take();
@@ -1163,7 +1178,20 @@ impl Editor {
 
     fn begin_work(&mut self) {
         let li = self.doc.active;
-        self.work = Some(Work { layer: li, img: (*self.doc.layers[li].img).clone() });
+        let mask = self.editing_mask();
+        self.work = Some(Work { layer: li, img: (**self.target(li)).clone(), mask });
+    }
+
+    /// Рисуем ли сейчас по маске активного слоя.
+    pub fn editing_mask(&self) -> bool {
+        self.mask_edit && self.doc.layer().mask.is_some()
+    }
+
+    /// Что редактируется на слое li: маска (если выбрана) или пиксели.
+    fn target(&self, li: usize) -> &Arc<Img> {
+        let l = &self.doc.layers[li];
+        if self.mask_edit && li == self.doc.active { if let Some(m) = &l.mask { return m; } }
+        &l.img
     }
 
     fn mirrors(&self) -> Vec<Mirror> {
@@ -1173,7 +1201,7 @@ impl Editor {
 
     fn paint_begin(&mut self, mode: PaintMode, x: f32, y: f32, pressure: f32, pos: Pos2, sh: &mut Shared) {
         if !self.check_layer() { return; }
-        let is_vec = self.doc.layer().is_vector();
+        let is_vec = self.doc.layer().is_vector() && !self.editing_mask();
         if is_vec && matches!(mode, PaintMode::Smudge | PaintMode::Clone) {
             self.toast("На векторном слое работают кисть и ластик. Для этого инструмента растеризуйте слой");
             return;
@@ -1271,7 +1299,9 @@ impl Editor {
                 self.buffer[(y * w + t.x as usize) * 4..(y * w + t.right() as usize) * 4].fill(0);
             }
             if let (Some(Active::Paint { mode: PaintMode::Smudge, .. }), Some(work)) = (&self.active, &mut self.work) {
-                work.img.copy_rect_from(&self.doc.layers[work.layer].img, t);
+                let l = &self.doc.layers[work.layer];
+                let s: &Img = if work.mask { l.mask.as_deref().unwrap_or(&l.img) } else { &l.img };
+                work.img.copy_rect_from(s, t);
             }
         }
         self.paint_feed(|s, sink| s.rerender(sink));
@@ -1384,7 +1414,7 @@ impl Editor {
         let Some(before) = self.doc.layers[li].vector.clone() else { return };
         let list = f(&before);
         let img = vector::render_full(self.doc.w, self.doc.h, &list);
-        self.work = Some(Work { layer: li, img });
+        self.work = Some(Work { layer: li, img, mask: false });
         let id = self.doc.layers[li].id.clone();
         self.hist.begin_group();
         self.commit_work(name);
@@ -1399,8 +1429,7 @@ impl Editor {
         let n = self.doc.next_name().replace("Слой", "Вектор");
         let mut l = Layer::new(self.doc.w, self.doc.h, &n);
         l.vector = Some(Arc::new(vec![]));
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Новый векторный слой");
+        self.add_layer(l, "Новый векторный слой");
         self.toast("Векторный слой: линии можно стирать до пересечения и масштабировать без потерь");
     }
 
@@ -1417,7 +1446,7 @@ impl Editor {
 
     /// Проверка для инструментов, которые работают только с пикселями.
     fn raster_only(&mut self) -> bool {
-        if self.doc.layer().is_vector() {
+        if self.doc.layer().is_vector() && !self.editing_mask() {
             self.toast("Это векторный слой. Растеризуйте его (Слои → Растеризовать) или выберите обычный слой");
             return false;
         }
@@ -1428,9 +1457,9 @@ impl Editor {
     fn apply_buffer(&mut self, r: Rect, mode: PaintMode, opacity: f32, grain: Option<&(Arc<Grain>, f32, f32)>, blend: Blend) {
         let Some(work) = &mut self.work else { return };
         let layer = &self.doc.layers[work.layer];
-        let src = &layer.img;
-        let is_vec = layer.is_vector();
-        let alpha_lock = layer.alpha_lock && !is_vec;
+        let src: &Img = if work.mask { layer.mask.as_deref().unwrap_or(&layer.img) } else { &layer.img };
+        let is_vec = layer.is_vector() && !work.mask;
+        let alpha_lock = layer.alpha_lock && !is_vec && !work.mask;
         let w = self.doc.w;
         let buf = &self.buffer;
         let sel = if is_vec { None } else { self.sel.as_deref() };
@@ -1496,7 +1525,7 @@ impl Editor {
                 f.dirty = false;
                 let img = filters::apply(f.id, &f.src, &f.params);
                 let out = if let Some(m) = &self.sel { mix_mask(&f.src, &img, m) } else { img };
-                self.work = Some(Work { layer: f.layer, img: out });
+                self.work = Some(Work { layer: f.layer, img: out, mask: f.mask });
                 self.invalidate_all();
             }
         }
@@ -1507,11 +1536,20 @@ impl Editor {
         let Some(work) = self.work.take() else { return };
         let Some(r) = r.clip(self.doc.w, self.doc.h) else { self.invalidate_all(); return };
         let li = work.layer.min(self.doc.layers.len() - 1);
-        let before = self.doc.layers[li].img.crop(r);
-        let after = work.img.crop(r);
-        self.doc.layers[li].img_mut().put(r.x, r.y, &after);
         let id = self.doc.layers[li].id.clone();
-        self.hist.push(name, Op::Pixels { layer: id, x: r.x, y: r.y, before, after });
+        let after = work.img.crop(r);
+        if work.mask && self.doc.layers[li].mask.is_some() {
+            let l = &mut self.doc.layers[li];
+            let m = Arc::make_mut(l.mask.as_mut().unwrap());
+            let before = m.crop(r);
+            m.put(r.x, r.y, &after);
+            l.ver += 1;
+            self.hist.push(name, Op::Mask { layer: id, x: r.x, y: r.y, before, after });
+        } else {
+            let before = self.doc.layers[li].img.crop(r);
+            self.doc.layers[li].img_mut().put(r.x, r.y, &after);
+            self.hist.push(name, Op::Pixels { layer: id, x: r.x, y: r.y, before, after });
+        }
         self.invalidate(r);
         self.mark_changed();
     }
@@ -1544,7 +1582,7 @@ impl Editor {
     fn fill_begin(&mut self, x: f32, y: f32, sx: f32, sh: &Shared) {
         if x < 0.0 || y < 0.0 || x >= self.doc.w as f32 || y >= self.doc.h as f32 { return; }
         if !self.check_layer() || !self.raster_only() { return; }
-        let src = if sh.prefs.fill_all_layers { doc::flatten(&self.doc, false) } else { (*self.doc.layer().img).clone() };
+        let src = if sh.prefs.fill_all_layers && !self.editing_mask() { doc::flatten(&self.doc, false) } else { (**self.target(self.doc.active)).clone() };
         self.begin_work();
         self.active = Some(Active::Fill { src, x: x as usize, y: y as usize, sx0: sx, base: sh.prefs.fill_tol, tol: sh.prefs.fill_tol, color: sh.colors.fg, prev: None, total: None, pending: true });
         self.fill_expand = sh.prefs.fill_expand;
@@ -1808,8 +1846,7 @@ impl Editor {
         self.apply_selection(nm, SelOp::Replace, None, "Растушёвка");
     }
     pub fn select_from_layer(&mut self) {
-        let m: Vec<u8> = self.doc.layer().img.px.chunks_exact(4).map(|p| p[3]).collect();
-        self.apply_selection(m, SelOp::Replace, None, "Выделить по слою");
+        self.select_layer_content(self.doc.active);
     }
     pub fn sel_bounds(&self) -> Option<Rect> {
         let m = self.sel.as_ref()?;
@@ -1825,8 +1862,9 @@ impl Editor {
     pub fn xform_begin(&mut self) -> bool {
         if !self.check_layer() { return false; }
         let li = self.doc.active;
-        let orig = self.doc.layers[li].img.clone();
-        let use_sel = self.sel.is_some() && !self.doc.layers[li].is_vector();
+        let xmask = self.editing_mask();
+        let orig = self.target(li).clone();
+        let use_sel = self.sel.is_some() && (!self.doc.layers[li].is_vector() || xmask);
         let bounds = if use_sel { self.sel_bounds() } else { orig.content_bounds() };
         let Some(b) = bounds else {
             self.toast(if use_sel { "Выделение пустое" } else { "На слое нечего трансформировать" });
@@ -1855,7 +1893,7 @@ impl Editor {
             hole.clear();
         }
         let st = XState { cx: b.x as f32 + b.w as f32 / 2.0, cy: b.y as f32 + b.h as f32 / 2.0, w: b.w as f32, h: b.h as f32, rot: 0.0 };
-        self.xform = Some(Xform { layer: li, float, hole, orig, mask: mask_crop, st, init: st, changed: false, smooth: true, uniform: false });
+        self.xform = Some(Xform { layer: li, on_mask: xmask, float, hole, orig, mask: mask_crop, st, init: st, changed: false, smooth: true, uniform: false });
         self.xform_render();
         true
     }
@@ -1872,7 +1910,7 @@ impl Editor {
         let Some(x) = &self.xform else { return };
         let mut img = x.hole.clone();
         raster::draw_affine(&mut img, &x.float, Self::xform_matrix(x), x.smooth);
-        self.work = Some(Work { layer: x.layer, img });
+        self.work = Some(Work { layer: x.layer, img, mask: x.on_mask });
         self.invalidate_all();
     }
 
@@ -1978,12 +2016,12 @@ impl Editor {
         self.active = None;
         if !x.changed { self.work = None; self.invalidate_all(); return; }
         let m = Self::xform_matrix(&x);
-        if let Some(list) = self.doc.layers.get(x.layer).and_then(|l| l.vector.clone()) {
+        if let Some(list) = self.doc.layers.get(x.layer).and_then(|l| l.vector.clone()).filter(|_| !x.on_mask) {
             // Векторный слой: преобразуем сами линии — без потери качества.
             let (bx, by) = (x.init.cx - x.init.w / 2.0, x.init.cy - x.init.h / 2.0);
             let md = Affine { e: m.e - (m.a * bx + m.c * by), f: m.f - (m.b * bx + m.d * by), ..m };
             let nl = vector::transform(&list, md);
-            self.work = Some(Work { layer: x.layer, img: vector::render_full(self.doc.w, self.doc.h, &nl) });
+            self.work = Some(Work { layer: x.layer, img: vector::render_full(self.doc.w, self.doc.h, &nl), mask: false });
             let id = self.doc.layers[x.layer].id.clone();
             self.hist.begin_group();
             self.commit_work("Трансформация");
@@ -2023,14 +2061,15 @@ impl Editor {
         if !self.check_layer() || !self.raster_only() { return; }
         let f = filters::find(id);
         let li = self.doc.active;
-        self.filter = Some(FilterSession { id: f.id, params: filters::defaults(f), layer: li, src: self.doc.layers[li].img.clone(), dirty: true });
+        let mask = self.editing_mask();
+        self.filter = Some(FilterSession { id: f.id, mask, params: filters::defaults(f), layer: li, src: self.target(li).clone(), dirty: true });
     }
     pub fn filter_apply(&mut self) {
         if let Some(f) = self.filter.take() {
             if f.dirty {
                 let img = filters::apply(f.id, &f.src, &f.params);
                 let out = if let Some(m) = &self.sel { mix_mask(&f.src, &img, m) } else { img };
-                self.work = Some(Work { layer: f.layer, img: out });
+                self.work = Some(Work { layer: f.layer, img: out, mask: f.mask });
             }
             self.commit_work(filters::find(f.id).name);
         }
@@ -2087,6 +2126,7 @@ impl Editor {
         self.sel_outline = None;
         self.sel_dirty = true;
         for l in self.doc.layers.iter_mut() { l.ver += 1; }
+        self.after_tree();
         self.invalidate_all();
         self.mark_changed();
     }
@@ -2094,7 +2134,7 @@ impl Editor {
     /* ---------- слои ---------- */
 
     pub fn layer_insert(&mut self, l: Layer, at: usize, name: &str) {
-        if self.doc.layers.len() >= self.doc.max_layers() { self.toast("Достигнут предел слоёв для этого размера холста"); return; }
+        if !l.group && self.doc.layers.iter().filter(|x| !x.group).count() >= self.doc.max_layers() { self.toast("Достигнут предел слоёв для этого размера холста"); return; }
         let prev = self.doc.active;
         let at = at.min(self.doc.layers.len());
         self.doc.layers.insert(at, l);
@@ -2103,13 +2143,39 @@ impl Editor {
         self.invalidate_all();
         self.mark_changed();
     }
+
+    /// Куда вставлять новый слой: над активным (в той же папке) или в начало раскрытой выбранной папки.
+    fn insert_pos(&self) -> (usize, Option<String>) {
+        let a = self.doc.active.min(self.doc.layers.len().saturating_sub(1));
+        match self.doc.layers.get(a) {
+            Some(l) if l.group && !l.collapsed => (a, Some(l.id.clone())),
+            Some(l) => (a + 1, l.parent.clone()),
+            None => (0, None),
+        }
+    }
+
+    /// Добавить новый слой над активным.
+    pub fn add_layer(&mut self, mut l: Layer, name: &str) {
+        let (at, parent) = self.insert_pos();
+        l.parent = parent;
+        self.multi.clear();
+        self.mask_edit = false;
+        self.layer_insert(l, at, name);
+    }
+
     pub fn layer_add(&mut self) {
         self.commit_pending();
         let n = self.doc.next_name();
         let l = Layer::new(self.doc.w, self.doc.h, &n);
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Новый слой");
+        self.add_layer(l, "Новый слой");
     }
+
+    pub fn layer_add_folder(&mut self) {
+        self.commit_pending();
+        let n = self.doc.next_name().replace("Слой", "Папка");
+        self.add_layer(Layer::new_group(&n), "Новая папка");
+    }
+
     pub fn layer_add_image(&mut self, img: Img, name: &str) {
         self.commit_pending();
         let mut l = Layer::new(self.doc.w, self.doc.h, name);
@@ -2117,43 +2183,357 @@ impl Editor {
         let im = if k < 1.0 { img.resize(((img.w as f32 * k) as usize).max(1), ((img.h as f32 * k) as usize).max(1)) } else { img };
         let (x, y) = ((self.doc.w as i32 - im.w as i32) / 2, (self.doc.h as i32 - im.h as i32) / 2);
         l.img_mut().put(x, y, &im);
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Вставить изображение");
+        self.add_layer(l, "Вставить изображение");
     }
+
+    /// Строки панели слоёв сверху вниз (без содержимого свёрнутых папок).
+    pub fn visible_rows(&self) -> Vec<usize> {
+        let ls = &self.doc.layers;
+        (0..ls.len()).rev().filter(|&i| {
+            let mut p = ls[i].parent.clone();
+            let mut g = 0;
+            while let Some(id) = p {
+                g += 1;
+                if g > 64 { break; }
+                match ls.iter().find(|l| l.id == id) { Some(x) => { if x.collapsed { return false; } p = x.parent.clone(); } None => break }
+            }
+            true
+        }).collect()
+    }
+
+    /// Выбрать соседнюю строку панели слоёв.
+    pub fn layer_select_step(&mut self, up: bool) {
+        let rows = self.visible_rows();
+        let Some(k) = rows.iter().position(|&i| i == self.doc.active) else { return };
+        let n = if up { k.checked_sub(1) } else { (k + 1 < rows.len()).then_some(k + 1) };
+        if let Some(n) = n { self.layer_select(rows[n]); }
+    }
+
+    /// Выбранные слои (активный и отмеченные), снизу вверх; содержимое выбранных папок не дублируется.
+    pub fn selected(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.doc.layers.iter().enumerate().filter(|(i, l)| *i == self.doc.active || self.multi.contains(&l.id)).map(|(i, _)| i).collect();
+        let ids: Vec<String> = v.iter().map(|&i| self.doc.layers[i].id.clone()).collect();
+        v.retain(|&i| !ids.iter().any(|g| doc::is_inside(&self.doc.layers, i, g)));
+        v
+    }
+
+    /// Изменение структуры слоёв одним шагом истории.
+    fn tree_edit(&mut self, name: &str, f: impl FnOnce(&mut Vec<Layer>, &mut usize) -> Result<(), String>) {
+        self.commit_pending();
+        let old = self.doc.layers.clone();
+        let old_active = self.doc.active;
+        let mut layers = self.doc.layers.clone();
+        let mut active = self.doc.active;
+        if let Err(e) = f(&mut layers, &mut active) {
+            if !e.is_empty() { self.toast(&e); }
+            return;
+        }
+        if layers.is_empty() {
+            let n = self.doc.next_name();
+            layers.push(Layer::new(self.doc.w, self.doc.h, &n));
+        }
+        doc::normalize(&mut layers);
+        self.doc.layers = layers;
+        self.doc.active = active.min(self.doc.layers.len() - 1);
+        self.hist.push(name, Op::Tree { other: old, active: old_active });
+        self.after_tree();
+        self.mark_changed();
+    }
+
+    fn after_tree(&mut self) {
+        if self.doc.layer().mask.is_none() { self.mask_edit = false; }
+        let ids: Vec<String> = self.doc.layers.iter().map(|l| l.id.clone()).collect();
+        let act = self.doc.layer().id.clone();
+        self.multi.retain(|m| ids.contains(m) && *m != act);
+        self.invalidate_all();
+    }
+
     pub fn layer_duplicate(&mut self) {
-        self.commit_pending();
-        let mut l = self.doc.layer().clone();
-        l.id = util::uid();
-        l.name = format!("{} (копия)", l.name);
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Дублировать слой");
+        let sel = self.selected();
+        let extra: usize = sel.iter().map(|&i| doc::block(&self.doc.layers, i).filter(|&k| !self.doc.layers[k].group).count()).sum();
+        if self.doc.layers.iter().filter(|x| !x.group).count() + extra > self.doc.max_layers() { self.toast("Достигнут предел слоёв для этого размера холста"); return; }
+        self.tree_edit(if sel.len() > 1 { "Дублировать слои" } else { "Дублировать слой" }, |layers, active| {
+            let mut last = 0;
+            // сверху вниз: вставка выше блока не сдвигает индексы ниже
+            for &i0 in sel.iter().rev() {
+                let r = doc::block(layers, i0);
+                let mut copy: Vec<Layer> = layers[r.clone()].to_vec();
+                let mut map: HashMap<String, String> = HashMap::new();
+                for l in copy.iter_mut() { let nid = util::uid(); map.insert(l.id.clone(), nid.clone()); l.id = nid; l.ver += 1; }
+                for l in copy.iter_mut() { if let Some(p) = l.parent.clone() { if let Some(np) = map.get(&p) { l.parent = Some(np.clone()); } } }
+                if let Some(root) = copy.last_mut() { root.name = format!("{} (копия)", root.name); }
+                let at = r.end;
+                let n = copy.len();
+                for (k, l) in copy.into_iter().enumerate() { layers.insert(at + k, l); }
+                last = last.max(at + n - 1);
+            }
+            *active = last;
+            Ok(())
+        });
+        self.multi.clear();
     }
+
     pub fn layer_delete(&mut self) {
-        self.commit_pending();
-        if self.doc.layers.len() == 1 { self.layer_clear(); return; }
+        let sel = self.selected();
+        self.tree_edit(if sel.len() > 1 { "Удалить слои" } else { "Удалить слой" }, |layers, active| {
+            let ranges: Vec<std::ops::Range<usize>> = sel.iter().map(|&i| doc::block(layers, i)).collect();
+            let low = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+            for r in ranges.iter().rev() { layers.drain(r.clone()); }
+            *active = low.saturating_sub(1).min(layers.len().saturating_sub(1));
+            Ok(())
+        });
+        self.multi.clear();
+    }
+
+    /// Перетащить слой (или папку целиком) к другому слою.
+    pub fn layer_move_to(&mut self, id: &str, target: Drop) {
+        let Some(from) = self.doc.find(id) else { return };
+        let moving = id.to_string();
+        self.tree_edit("Переместить слой", |layers, active| {
+            let r = doc::block(layers, from);
+            let tid = match &target { Drop::Above(t) | Drop::Below(t) | Drop::Into(t) => t.clone() };
+            if tid == moving || r.clone().any(|k| layers[k].id == tid) { return Err(String::new()); }
+            let moved: Vec<Layer> = layers.drain(r).collect();
+            let Some(t) = layers.iter().position(|l| l.id == tid) else { return Err(String::new()) };
+            let (at, parent) = match &target {
+                Drop::Above(_) => (t + 1, layers[t].parent.clone()),
+                Drop::Below(_) => (if layers[t].group { doc::group_start(layers, t) } else { t }, layers[t].parent.clone()),
+                Drop::Into(_) => {
+                    if !layers[t].group { return Err(String::new()); }
+                    layers[t].collapsed = false;
+                    (t, Some(tid.clone()))
+                }
+            };
+            let n = moved.len();
+            for (k, mut l) in moved.into_iter().enumerate() {
+                if k == n - 1 { l.parent = parent.clone(); }
+                layers.insert(at + k, l);
+            }
+            *active = at + n - 1;
+            Ok(())
+        });
+    }
+
+    /// Сдвинуть активный слой на одну позицию вверх или вниз (папки перепрыгиваются целиком, из папки — выход).
+    pub fn layer_step(&mut self, up: bool) {
+        let layers = &self.doc.layers;
         let i = self.doc.active;
-        let l = self.doc.layers.remove(i);
-        let prev = self.doc.active;
-        self.doc.active = i.saturating_sub(1).min(self.doc.layers.len() - 1);
-        self.hist.push("Удалить слой", Op::Remove { index: i, layer: Some(l), prev_active: prev });
-        self.invalidate_all();
-        self.mark_changed();
+        let r = doc::block(layers, i);
+        let my_parent = layers[i].parent.clone();
+        let id = layers[i].id.clone();
+        let target = if up {
+            if r.end >= layers.len() { return; }
+            let mut cand = r.end;
+            loop {
+                if Some(&layers[cand].id) == my_parent.as_ref() || layers[cand].parent == my_parent { break Some(Drop::Above(layers[cand].id.clone())); }
+                match layers[cand].parent.as_ref().and_then(|p| layers.iter().position(|l| &l.id == p)) {
+                    Some(pi) => cand = pi,
+                    None => break None,
+                }
+            }
+        } else {
+            if r.start == 0 { return; }
+            let k = r.start - 1;
+            if layers[k].parent == my_parent { Some(Drop::Below(layers[k].id.clone())) } else { my_parent.clone().map(Drop::Below) }
+        };
+        if let Some(t) = target { self.layer_move_to(&id, t); }
     }
+
+    /// Совместимость: переместить слой с позиции from на позицию to (соседние слои).
     pub fn layer_move(&mut self, from: usize, to: usize) {
-        if from == to || to >= self.doc.layers.len() { return; }
-        self.commit_pending();
-        let l = self.doc.layers.remove(from);
-        self.doc.layers.insert(to, l);
-        self.doc.active = to;
-        self.hist.push("Переместить слой", Op::Move { from, to });
-        self.invalidate_all();
-        self.mark_changed();
+        if from >= self.doc.layers.len() || to >= self.doc.layers.len() || from == to { return; }
+        self.doc.active = from;
+        self.layer_step(to > from);
     }
+
+    /// Положить выбранные слои в новую папку (Ctrl+G).
+    pub fn group_selected(&mut self) {
+        let sel = self.selected();
+        let name = self.doc.next_name().replace("Слой", "Папка");
+        self.tree_edit("Объединить в папку", |layers, active| {
+            if sel.is_empty() { return Err(String::new()); }
+            let ranges: Vec<std::ops::Range<usize>> = sel.iter().map(|&i| doc::block(layers, i)).collect();
+            let top = *sel.last().unwrap();
+            let mut g = Layer::new_group(&name);
+            g.parent = layers[top].parent.clone();
+            let gid = g.id.clone();
+            let removed_below: usize = ranges[..ranges.len() - 1].iter().map(|r| r.len()).sum();
+            let at = ranges.last().unwrap().start - removed_below;
+            let mut blocks: Vec<Vec<Layer>> = vec![];
+            for r in ranges.iter().rev() {
+                let mut b: Vec<Layer> = layers.drain(r.clone()).collect();
+                if let Some(root) = b.last_mut() { root.parent = Some(gid.clone()); }
+                blocks.push(b);
+            }
+            blocks.reverse();
+            let mut k = at;
+            for b in blocks { for l in b { layers.insert(k, l); k += 1; } }
+            layers.insert(k, g);
+            *active = k;
+            Ok(())
+        });
+        self.multi.clear();
+    }
+
+    /// Расформировать папку: содержимое остаётся на месте.
+    pub fn ungroup(&mut self) {
+        let i = self.doc.active;
+        if !self.doc.layers[i].group { self.toast("Выберите папку"); return; }
+        self.tree_edit("Расформировать папку", |layers, active| {
+            let g = layers.remove(i);
+            for l in layers.iter_mut() { if l.parent.as_deref() == Some(g.id.as_str()) { l.parent = g.parent.clone(); } }
+            *active = i.saturating_sub(1).min(layers.len().saturating_sub(1));
+            Ok(())
+        });
+    }
+
     pub fn layer_select(&mut self, i: usize) {
-        if i < self.doc.layers.len() && i != self.doc.active {
-            self.commit_pending();
+        if i < self.doc.layers.len() {
+            if i != self.doc.active { self.commit_pending(); }
+            self.doc.active = i;
+            self.multi.clear();
+            self.mask_edit = false;
+        }
+    }
+
+    /// Ctrl+щелчок: добавить слой к выбранным или убрать из них.
+    pub fn layer_select_toggle(&mut self, i: usize) {
+        if i >= self.doc.layers.len() { return; }
+        self.commit_pending();
+        let id = self.doc.layers[i].id.clone();
+        if i == self.doc.active {
+            if let Some(next) = self.multi.pop() { if let Some(k) = self.doc.find(&next) { self.doc.active = k; } }
+        } else if let Some(p) = self.multi.iter().position(|m| *m == id) {
+            self.multi.remove(p);
+        } else {
+            let a = self.doc.layer().id.clone();
+            self.multi.push(a);
             self.doc.active = i;
         }
+        self.mask_edit = false;
+    }
+
+    /// Shift+щелчок: выбрать диапазон.
+    pub fn layer_select_range(&mut self, i: usize) {
+        if i >= self.doc.layers.len() { return; }
+        self.commit_pending();
+        let (a, b) = (self.doc.active.min(i), self.doc.active.max(i));
+        self.multi = (a..=b).filter(|&k| k != i).map(|k| self.doc.layers[k].id.clone()).collect();
+        self.doc.active = i;
+        self.mask_edit = false;
+    }
+
+    /// Выбрать маску слоя для рисования.
+    pub fn layer_select_mask(&mut self, i: usize) {
+        self.layer_select(i);
+        self.mask_edit = self.doc.layer().mask.is_some();
+    }
+
+    /// Alt+щелчок по глазу: показать только этот слой; повторно — показать все.
+    pub fn layer_solo(&mut self, i: usize) {
+        let n = self.doc.layers.len();
+        if i >= n { return; }
+        let id = self.doc.layers[i].id.clone();
+        let keep: Vec<bool> = (0..n).map(|k| k == i || doc::is_inside(&self.doc.layers, k, &id) || doc::is_inside(&self.doc.layers, i, &self.doc.layers[k].id)).collect();
+        let others_hidden = (0..n).filter(|&k| !keep[k] && !self.doc.layers[k].group).all(|k| !self.doc.layers[k].visible);
+        self.hist.begin_group();
+        for k in 0..n {
+            if keep[k] { self.layer_props(k, |l| l.visible = true, "Видимость"); }
+            else if !self.doc.layers[k].group { self.layer_props(k, |l| l.visible = others_hidden, "Видимость"); }
+        }
+        self.hist.end_group(if others_hidden { "Показать все слои" } else { "Показать только этот слой" });
+    }
+
+    /// Выделить по содержимому слоя или папки (Ctrl+щелчок по миниатюре).
+    pub fn select_layer_content(&mut self, i: usize) {
+        if i >= self.doc.layers.len() { return; }
+        let m: Vec<u8> = if self.doc.layers[i].group {
+            let idx: Vec<usize> = doc::block(&self.doc.layers, i).collect();
+            doc::flatten_some(&self.doc, &idx).px.chunks_exact(4).map(|p| p[3]).collect()
+        } else {
+            let img: &Img = if i == self.doc.active { self.target(i) } else { &self.doc.layers[i].img };
+            img.px.chunks_exact(4).map(|p| p[3]).collect()
+        };
+        self.apply_selection(m, SelOp::Replace, None, "Выделить по слою");
+    }
+
+    /* ---------- маски слоя ---------- */
+
+    pub fn mask_add(&mut self) {
+        self.commit_pending();
+        let li = self.doc.active;
+        if self.doc.layers[li].mask.is_some() { self.mask_edit = true; self.toast("У слоя уже есть маска — она выбрана для рисования"); return; }
+        let (w, h) = (self.doc.w, self.doc.h);
+        let mut m = Img::new(w, h);
+        match &self.sel {
+            Some(s) => for (i, v) in s.iter().enumerate() { m.px[i * 4..i * 4 + 4].copy_from_slice(&[*v, *v, *v, *v]); },
+            None => m.px.fill(255),
+        }
+        let id = self.doc.layers[li].id.clone();
+        let after = Some(Arc::new(m));
+        self.doc.layers[li].mask = after.clone();
+        self.doc.layers[li].mask_on = true;
+        self.doc.layers[li].ver += 1;
+        self.hist.push("Маска слоя", Op::MaskSet { layer: id, before: None, after });
+        self.mask_edit = true;
+        self.invalidate_all();
+        self.mark_changed();
+        self.toast("Маска слоя: ластик скрывает, кисть возвращает");
+    }
+
+    pub fn mask_delete(&mut self) {
+        self.commit_pending();
+        let li = self.doc.active;
+        let Some(before) = self.doc.layers[li].mask.take() else { return };
+        self.doc.layers[li].ver += 1;
+        let id = self.doc.layers[li].id.clone();
+        self.hist.push("Удалить маску", Op::MaskSet { layer: id, before: Some(before), after: None });
+        self.mask_edit = false;
+        self.invalidate_all();
+        self.mark_changed();
+    }
+
+    /// Применить маску: скрытое удаляется из пикселей слоя.
+    pub fn mask_apply(&mut self) {
+        self.commit_pending();
+        let li = self.doc.active;
+        if self.doc.layers[li].group { self.toast("Маску папки можно применить, объединив папку"); return; }
+        let Some(m) = self.doc.layers[li].mask.clone() else { return };
+        let before = (*self.doc.layers[li].img).clone();
+        let mut after = before.clone();
+        if self.doc.layers[li].mask_on {
+            for (p, q) in after.px.chunks_exact_mut(4).zip(m.px.chunks_exact(4)) {
+                let k = q[3] as f32 / 255.0;
+                for c in p.iter_mut() { *c = (*c as f32 * k).round() as u8; }
+            }
+        }
+        let id = self.doc.layers[li].id.clone();
+        self.hist.begin_group();
+        self.doc.layers[li].img = Arc::new(after.clone());
+        self.hist.push("Применить маску", Op::Pixels { layer: id.clone(), x: 0, y: 0, before, after });
+        self.doc.layers[li].mask = None;
+        self.hist.push("Применить маску", Op::MaskSet { layer: id.clone(), before: Some(m), after: None });
+        if let Some(v) = self.doc.layers[li].vector.take() { self.hist.push("Применить маску", Op::Vector { layer: id, before: Some(v), after: None }); }
+        self.hist.end_group("Применить маску");
+        self.doc.layers[li].ver += 1;
+        self.mask_edit = false;
+        self.invalidate_all();
+        self.mark_changed();
+    }
+
+    pub fn mask_invert(&mut self) {
+        self.commit_pending();
+        let li = self.doc.active;
+        let Some(m) = self.doc.layers[li].mask.clone() else { return };
+        let before = (*m).clone();
+        let mut after = before.clone();
+        for p in after.px.chunks_exact_mut(4) { let v = 255 - p[3]; p.copy_from_slice(&[v, v, v, v]); }
+        let id = self.doc.layers[li].id.clone();
+        self.doc.layers[li].mask = Some(Arc::new(after.clone()));
+        self.doc.layers[li].ver += 1;
+        self.hist.push("Инвертировать маску", Op::Mask { layer: id, x: 0, y: 0, before, after });
+        self.invalidate_all();
+        self.mark_changed();
     }
     pub fn layer_props(&mut self, i: usize, f: impl FnOnce(&mut Layer), name: &str) {
         let Some(l) = self.doc.layers.get_mut(i) else { return };
@@ -2184,18 +2564,28 @@ impl Editor {
     fn layer_pixels(&mut self, name: &str, f: impl FnOnce(&mut Img, Option<&[u8]>)) {
         if !self.check_layer() { return; }
         let li = self.doc.active;
-        let before = (*self.doc.layers[li].img).clone();
         let sel = self.sel.clone();
-        f(self.doc.layers[li].img_mut(), sel.as_deref());
-        let after = (*self.doc.layers[li].img).clone();
         let id = self.doc.layers[li].id.clone();
-        self.hist.push(name, Op::Pixels { layer: id, x: 0, y: 0, before, after });
+        if self.editing_mask() {
+            let l = &mut self.doc.layers[li];
+            let m = Arc::make_mut(l.mask.as_mut().unwrap());
+            let before = m.clone();
+            f(m, sel.as_deref());
+            let after = m.clone();
+            l.ver += 1;
+            self.hist.push(name, Op::Mask { layer: id, x: 0, y: 0, before, after });
+        } else {
+            let before = (*self.doc.layers[li].img).clone();
+            f(self.doc.layers[li].img_mut(), sel.as_deref());
+            let after = (*self.doc.layers[li].img).clone();
+            self.hist.push(name, Op::Pixels { layer: id, x: 0, y: 0, before, after });
+        }
         self.invalidate_all();
         self.mark_changed();
     }
     pub fn layer_clear(&mut self) {
         self.commit_pending();
-        if self.doc.layer().is_vector() {
+        if self.doc.layer().is_vector() && !self.editing_mask() {
             if self.doc.layer().locked { self.toast("Слой заблокирован"); return; }
             let (w, h) = (self.doc.w, self.doc.h);
             let sel = self.sel.clone();
@@ -2231,7 +2621,7 @@ impl Editor {
     }
     pub fn layer_flip(&mut self, horiz: bool) {
         self.commit_pending();
-        if self.doc.layer().is_vector() {
+        if self.doc.layer().is_vector() && !self.editing_mask() {
             let (w, h) = (self.doc.w as f32, self.doc.h as f32);
             let m = if horiz { Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w, f: 0.0 } } else { Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h } };
             self.vector_replace("Отразить слой", |l| vector::transform(l, m));
@@ -2239,46 +2629,161 @@ impl Editor {
         }
         self.layer_pixels("Отразить слой", |img, _| img.flip(horiz));
     }
+    /// Нижний соседний слой (в той же папке), с которым можно объединить активный.
+    fn lower_sibling(&mut self) -> Option<usize> {
+        let i = self.doc.active;
+        if i == 0 { self.toast("Ниже нет слоя"); return None; }
+        let li = i - 1;
+        if self.doc.layers[li].parent != self.doc.layers[i].parent || self.doc.layers[li].group {
+            self.toast(if self.doc.layers[li].group { "Ниже папка — объединять можно только с обычным слоем" } else { "Ниже нет слоя в этой папке" });
+            return None;
+        }
+        Some(li)
+    }
+
+    /// Свести пару «нижний + верхний» так, как они видны (нижний — как основа без своих эффектов).
+    fn merge_pair(&self, low: &Layer, up: &Layer) -> Img {
+        let mut base = low.clone();
+        base.opacity = 1.0;
+        base.blend = Blend::Normal;
+        base.clip = false;
+        base.visible = true;
+        base.parent = None;
+        base.draft = false;
+        let mut top = up.clone();
+        top.parent = None;
+        top.draft = false;
+        let mut tmp = Document::new("", self.doc.w, self.doc.h, [0, 0, 0], false);
+        tmp.layers = vec![base, top];
+        doc::flatten(&tmp, false)
+    }
+
     pub fn merge_down(&mut self) {
         self.commit_pending();
+        let sel = self.selected();
+        if sel.len() > 1 { self.merge_selected(); return; }
         let i = self.doc.active;
-        if i == 0 { self.toast("Ниже нет слоя"); return; }
-        let up = self.doc.layers[i].clone();
-        let li = i - 1;
-        let before = (*self.doc.layers[li].img).clone();
-        let mut merged = before.clone();
-        if up.visible {
-            let mut tmp = Document::new("", self.doc.w, self.doc.h, [0, 0, 0], false);
-            let mut base = self.doc.layers[li].clone();
-            base.opacity = 1.0;
-            base.blend = Blend::Normal;
-            base.clip = false;
-            base.visible = true;
-            tmp.layers = vec![base, up.clone()];
-            merged = doc::flatten(&tmp, false);
+        if self.doc.layers[i].group { self.merge_folder(); return; }
+        let Some(li) = self.lower_sibling() else { return };
+        let (low, up) = (self.doc.layers[li].clone(), self.doc.layers[i].clone());
+        let img = if up.visible { self.merge_pair(&low, &up) } else { low.baked() };
+        let simple = up.blend == Blend::Normal && !up.clip && (up.opacity - 1.0).abs() < 1e-3 && up.mask.is_none() && up.tint.is_none() && low.mask.is_none() && low.tint.is_none();
+        let vec = match (&low.vector, &up.vector, up.visible) {
+            (Some(lv), _, false) => Some(lv.clone()),
+            (Some(lv), Some(uv), true) if simple => { let mut v = (**lv).clone(); v.extend(uv.iter().cloned()); Some(Arc::new(v)) }
+            _ => None,
+        };
+        let mut nl = low.clone();
+        nl.img = Arc::new(img);
+        nl.mask = None;
+        nl.tint = None;
+        nl.vector = vec;
+        nl.text = None;
+        nl.ver += 1;
+        self.tree_edit("Объединить с нижним", |layers, active| {
+            layers[li] = nl;
+            layers.remove(i);
+            *active = li;
+            Ok(())
+        });
+    }
+
+    /// Перенести изображение на нижний слой (верхний остаётся пустым).
+    pub fn transfer_down(&mut self) {
+        self.commit_pending();
+        let i = self.doc.active;
+        if self.doc.layers[i].group { self.toast("Выберите слой, а не папку"); return; }
+        let Some(li) = self.lower_sibling() else { return };
+        let (low, up) = (self.doc.layers[li].clone(), self.doc.layers[i].clone());
+        let mut nl = low.clone();
+        nl.img = Arc::new(self.merge_pair(&low, &up));
+        nl.mask = None;
+        nl.tint = None;
+        nl.vector = None;
+        nl.text = None;
+        nl.ver += 1;
+        let mut nu = up.clone();
+        nu.img = Arc::new(Img::new(self.doc.w, self.doc.h));
+        nu.text = None;
+        if nu.vector.is_some() { nu.vector = Some(Arc::new(vec![])); }
+        nu.ver += 1;
+        self.tree_edit("Перенести на нижний слой", |layers, active| {
+            layers[li] = nl;
+            layers[i] = nu;
+            *active = i;
+            Ok(())
+        });
+    }
+
+    /// Объединить папку в один слой.
+    pub fn merge_folder(&mut self) {
+        self.commit_pending();
+        let i = self.doc.active;
+        if !self.doc.layers[i].group { return; }
+        let r = doc::block(&self.doc.layers, i);
+        let mut blk: Vec<Layer> = self.doc.layers[r.clone()].to_vec();
+        let g = self.doc.layers[i].clone();
+        if let Some(root) = blk.last_mut() {
+            root.parent = None;
+            root.visible = true;
+            root.opacity = 1.0;
+            root.blend = Blend::Normal;
+            root.pass = false;
+            root.clip = false;
         }
-        self.hist.begin_group();
-        let id = self.doc.layers[li].id.clone();
-        let lower_vec = self.doc.layers[li].vector.clone();
-        if let Some(lv) = lower_vec {
-            let simple = up.blend == Blend::Normal && !up.clip && (up.opacity - 1.0).abs() < 1e-3;
-            let nv = match (&up.vector, up.visible) {
-                (Some(uv), true) if simple => { let mut v = (*lv).clone(); v.extend(uv.iter().cloned()); Some(Arc::new(v)) }
-                (_, false) => Some(lv.clone()),
-                _ => None,
-            };
-            self.doc.layers[li].vector = nv.clone();
-            self.hist.push("Объединить", Op::Vector { layer: id.clone(), before: Some(lv), after: nv });
-        }
-        self.doc.layers[li].img = Arc::new(merged.clone());
-        self.doc.layers[li].ver += 1;
-        self.hist.push("Объединить", Op::Pixels { layer: id, x: 0, y: 0, before, after: merged });
-        let l = self.doc.layers.remove(i);
-        self.doc.active = li;
-        self.hist.push("Объединить", Op::Remove { index: i, layer: Some(l), prev_active: i });
-        self.hist.end_group("Объединить с нижним");
-        self.invalidate_all();
-        self.mark_changed();
+        let mut tmp = Document::new("", self.doc.w, self.doc.h, [0, 0, 0], false);
+        tmp.layers = blk;
+        doc::normalize(&mut tmp.layers);
+        let mut nl = Layer::new(self.doc.w, self.doc.h, &g.name);
+        nl.img = Arc::new(doc::flatten(&tmp, false));
+        nl.opacity = g.opacity;
+        nl.blend = if g.pass { Blend::Normal } else { g.blend };
+        nl.visible = g.visible;
+        nl.parent = g.parent.clone();
+        nl.clip = g.clip;
+        self.tree_edit("Объединить папку", |layers, active| {
+            let start = r.start;
+            layers.drain(r);
+            layers.insert(start, nl);
+            *active = start;
+            Ok(())
+        });
+    }
+
+    /// Объединить все выбранные слои в один.
+    pub fn merge_selected(&mut self) {
+        self.commit_pending();
+        let sel = self.selected();
+        if sel.len() < 2 { self.merge_down(); return; }
+        let idx: Vec<usize> = sel.iter().flat_map(|&i| doc::block(&self.doc.layers, i)).collect();
+        let img = doc::flatten_some(&self.doc, &idx);
+        let top = *sel.last().unwrap();
+        let mut nl = Layer::new(self.doc.w, self.doc.h, &self.doc.layers[top].name);
+        nl.img = Arc::new(img);
+        nl.parent = self.doc.layers[top].parent.clone();
+        self.tree_edit("Объединить выбранные слои", |layers, active| {
+            let ranges: Vec<std::ops::Range<usize>> = sel.iter().map(|&i| doc::block(layers, i)).collect();
+            let removed_below: usize = ranges[..ranges.len() - 1].iter().map(|r| r.len()).sum();
+            let at = ranges.last().unwrap().start - removed_below;
+            for r in ranges.iter().rev() { layers.drain(r.clone()); }
+            layers.insert(at, nl);
+            *active = at;
+            Ok(())
+        });
+        self.multi.clear();
+    }
+
+    /// Новый слой из всего видимого (без изменения остальных).
+    pub fn merge_visible_new(&mut self) {
+        self.commit_pending();
+        let mut l = Layer::new(self.doc.w, self.doc.h, "Видимое");
+        l.img = Arc::new(doc::flatten(&self.doc, false));
+        self.tree_edit("Совместить видимые на новом слое", |layers, active| {
+            let at = layers.len();
+            layers.insert(at, l);
+            *active = at;
+            Ok(())
+        });
     }
     fn replace_layers(&mut self, layers: Vec<Layer>, w: usize, h: usize, name: &str) {
         let old = std::mem::replace(&mut self.doc.layers, layers);
@@ -2304,9 +2809,11 @@ impl Editor {
         let layers: Vec<Layer> = self.doc.layers.iter().map(|l| {
             let mut n = l.clone();
             match &l.vector {
+                _ if l.group => {}
                 Some(v) => { let nv = vector::transform(v, aff); n.img = Arc::new(vector::render_full(nw, nh, &nv)); n.vector = Some(Arc::new(nv)); }
                 None => n.img = Arc::new(f(&l.img)),
             }
+            if let Some(m) = &l.mask { n.mask = Some(Arc::new(f(m))); }
             n.ver += 1;
             n
         }).collect();
@@ -2366,8 +2873,7 @@ impl Editor {
         let Some((img, x, y)) = self.clipboard.clone() else { self.toast("Буфер обмена пуст"); return };
         let mut l = Layer::new(self.doc.w, self.doc.h, "Вставка");
         l.img_mut().put(x, y, &img);
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Вставить");
+        self.add_layer(l, "Вставить");
     }
     pub fn copy_to_layer(&mut self, cut: bool) {
         let Some((img, x, y)) = self.selection_content(false) else { self.toast("Нечего копировать"); return };
@@ -2375,8 +2881,7 @@ impl Editor {
         if cut { self.layer_clear(); }
         let mut l = Layer::new(self.doc.w, self.doc.h, if cut { "Вырезанный фрагмент" } else { "Копия фрагмента" });
         l.img_mut().put(x, y, &img);
-        let at = self.doc.active + 1;
-        self.layer_insert(l, at, "Новый слой");
+        self.add_layer(l, "Новый слой");
         self.hist.end_group(if cut { "Вырезать на новый слой" } else { "Скопировать на новый слой" });
     }
 
@@ -2404,8 +2909,7 @@ impl Editor {
                 let mut l = Layer::new(self.doc.w, self.doc.h, if name.is_empty() { "Текст" } else { &name });
                 l.img = Arc::new(img);
                 l.text = Some(spec);
-                let at = self.doc.active + 1;
-                self.layer_insert(l, at, "Текст");
+                self.add_layer(l, "Текст");
             }
         }
     }
@@ -2433,6 +2937,9 @@ impl Editor {
                 if k(Key::J) { action = Some(if shift { "cut_layer" } else { "dup_or_copy" }); }
                 if k(Key::E) { action = Some(if shift { "flatten" } else { "merge" }); }
                 if k(Key::T) { action = Some("transform"); }
+                if k(Key::G) { action = Some(if shift { "ungroup" } else { "group" }); }
+                if k(Key::OpenBracket) { action = Some("layer_down"); }
+                if k(Key::CloseBracket) { action = Some("layer_up"); }
                 if k(Key::Num0) { action = Some("fit"); }
                 if k(Key::Num1) { action = Some("actual"); }
                 if k(Key::Plus) || k(Key::Equals) { action = Some("zoom_in"); }
@@ -2449,8 +2956,8 @@ impl Editor {
             if k(Key::X) { action = Some("swap"); }
             if k(Key::D) { action = Some("default_colors"); }
             if k(Key::F) { action = Some("flip_view"); }
-            if k(Key::OpenBracket) { action = Some("size_down"); }
-            if k(Key::CloseBracket) { action = Some("size_up"); }
+            if k(Key::OpenBracket) { action = Some(if i.modifiers.alt { "layer_sel_down" } else { "size_down" }); }
+            if k(Key::CloseBracket) { action = Some(if i.modifiers.alt { "layer_sel_up" } else { "size_up" }); }
             if k(Key::Delete) || k(Key::Backspace) { action = Some("clear"); }
             if k(Key::Enter) { action = Some("enter"); }
             if k(Key::Escape) { action = Some("escape"); }

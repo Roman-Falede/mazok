@@ -106,9 +106,11 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn uid() -> String {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let t = now_ms() as u64;
     let r = random_seed() as u64;
-    format!("{:x}{:06x}", t, r & 0xffffff)
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}{:06x}{:x}", t, r & 0xffffff, n & 0xfff)
 }
 
 pub fn clamp01(v: f32) -> f32 {
