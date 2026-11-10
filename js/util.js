@@ -174,6 +174,14 @@ U.download = (blob, name) => {
   setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 };
 U.save = async (blob, name) => {
+  if (window.MazokAndroid) {
+    try {
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(blob); });
+      const msg = window.MazokAndroid.saveFile(name, blob.type || 'application/octet-stream', b64);
+      if (msg) U.toast(msg, 2600);
+      return;
+    } catch (e) { U.toast('Не удалось сохранить: ' + e.message, 3000); return; }
+  }
   const touch = matchMedia('(pointer:coarse)').matches;
   if (touch && navigator.canShare) {
     try {
@@ -208,7 +216,7 @@ const Settings = {
   theme: 'dark', lefty: false, touchDraw: true, fingerPressure: false, pressureGamma: 1, holdPick: true, holdDelay: 450,
   quickShape: true, quickShapeDelay: 650, cursor: true, rotateGesture: true, rotateSnap: true, historyMB: 600,
   timelapse: true, fillTol: 22, fillExpand: 1, fillSource: 'layer', pickSource: 'all', streamlineMul: 1,
-  cloneAligned: true,
+  cloneAligned: true, uiMode: 'auto',
   load() {
     try { Object.assign(this, JSON.parse(localStorage.getItem('mazok.settings') || '{}')); } catch (e) { }
   },
@@ -289,4 +297,5 @@ const Icons = {
   fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   record2: '<circle cx="12" cy="12" r="6" fill="currentColor"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5M8 10.5h5M10.5 8v5"/>',
+  gradient: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M8 5v14" stroke-opacity=".9"/><path d="M12 5v14" stroke-opacity=".6"/><path d="M16 5v14" stroke-opacity=".3"/>',
 };

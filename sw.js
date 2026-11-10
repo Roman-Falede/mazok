@@ -1,9 +1,9 @@
 /* Мазок — офлайн-кэш */
-const CACHE = 'mazok-v1';
+const CACHE = 'mazok-v2';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/util.js', 'js/store.js', 'js/brushes.js', 'js/engine.js', 'js/guides.js', 'js/view.js', 'js/tools.js',
-  'js/adjust.js', 'js/color.js', 'js/formats.js', 'js/ui.js', 'js/panels.js', 'js/gallery.js', 'js/app.js',
+  'js/adjust.js', 'js/color.js', 'js/formats.js', 'js/ui.js', 'js/panels.js', 'js/desk.js', 'js/gallery.js', 'js/app.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'
 ];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });

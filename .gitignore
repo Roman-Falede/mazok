@@ -1,0 +1,5 @@
+dist/
+build/windows/sdk/
+build/android/sdk/
+build/android/*.keystore
+build/android/keystore.password

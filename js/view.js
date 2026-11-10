@@ -10,7 +10,7 @@ const View = {
     this.resize(); Input.init(this.cv);
     setInterval(() => { if (Sel.active && Sel.path && Engine.doc) { this.antsT = (this.antsT + 1) % 16; this.requestDraw(); } }, 140);
   },
-  theme() { this.stageColor = getComputedStyle(document.documentElement).getPropertyValue('--stage').trim() || '#2a2b30'; this.requestDraw(); },
+  theme() { this.stageColor = getComputedStyle(document.body).getPropertyValue('--stage').trim() || '#2a2b30'; this.requestDraw(); },
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     const W = window.innerWidth, H = window.innerHeight;
@@ -26,6 +26,11 @@ const View = {
   toScreen(x, y) { const m = this.m(); return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; },
   toDoc(X, Y) { const m = this.m(), det = m[0] * m[3] - m[1] * m[2], dx = X - m[4], dy = Y - m[5]; return [(m[3] * dx - m[2] * dy) / det, (-m[1] * dx + m[0] * dy) / det]; },
   area() {
+    if (UI.desk) {
+      const hid = document.body.classList.contains('ui-hidden');
+      const l = hid ? 0 : 44, r = hid ? 0 : 300, t = hid ? 0 : 98, b = (hid ? 0 : 24) + (Engine.doc && Engine.doc.anim.on ? 70 : 0);
+      return { x: l + 8, y: t + 8, w: Math.max(50, this.W - l - r - 16), h: Math.max(50, this.H - t - b - 16) };
+    }
     const narrow = this.W < 600;
     const l = narrow ? 58 : 66, r = narrow ? 52 : 62, t = 58, b = Engine.doc && Engine.doc.anim.on ? 84 : 14;
     return { x: l, y: t, w: Math.max(50, this.W - l - r), h: Math.max(50, this.H - t - b) };
@@ -172,6 +177,7 @@ const Input = {
   move(e) {
     if (this.ignore.has(e.pointerId)) return;
     const pt = this.ptrs.get(e.pointerId);
+    if (UI.desk) { const [x, y] = View.toDoc(e.clientX, e.clientY); Desk.coords(x, y); }
     if (!pt) {
       if (e.pointerType !== 'touch') { View.hover = { x: e.clientX, y: e.clientY, type: e.pointerType }; if (Tools.isPaint() || Tools.cur === 'liquify') View.requestDraw(); }
       return;

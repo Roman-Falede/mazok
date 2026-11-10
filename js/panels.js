@@ -7,9 +7,29 @@ const Panels = {
   layersHead() {
     return U.el('button', { class: 'tb', title: 'Новый слой (Ctrl+Shift+N)', onclick: () => { Tools.commitPending(); Ops.add(); } }, U.icon('plus'));
   },
+  blendSelect(L, cls) {
+    const sel = U.el('select', { class: cls || 'input', title: 'Режим наложения слоя', onchange: () => Ops.setProps(L, { blend: sel.value }, 'Режим наложения') });
+    BLEND_GROUPS.forEach(([a, b], gi) => {
+      const g = U.el('optgroup', { label: ['Обычные', 'Затемнение', 'Осветление', 'Контраст', 'Сравнение', 'Компоненты'][gi] });
+      for (let i = a; i < b; i++) g.append(U.el('option', { value: BLENDS[i][0], text: BLENDS[i][1], selected: BLENDS[i][0] === L.blend }));
+      sel.append(g);
+    });
+    return sel;
+  },
   layers() {
-    const d = Engine.doc, wrap = U.el('div');
-    const n = d.layers.length;
+    const d = Engine.doc, wrap = U.el('div', { class: 'lpanel' });
+    const n = d.layers.length, A = d.layer;
+    if (A) {
+      let before = null;
+      const op = U.el('input', { type: 'range', min: 0, max: 100, value: Math.round(A.opacity * 100), class: 'mini-r' });
+      const opn = U.el('span', { class: 'lp-n', text: Math.round(A.opacity * 100) + '%' });
+      op.addEventListener('input', () => { if (!before) before = { opacity: A.opacity }; A.opacity = +op.value / 100; opn.textContent = op.value + '%'; Engine.renderAll(); });
+      op.addEventListener('change', () => { if (before) Ops.propsCommit(A, before, 'Непрозрачность слоя'); before = null; UI.layersChanged(); });
+      const lk = (icon, prop, title) => U.el('button', { class: 'lp-b' + (A[prop] ? ' on' : ''), title, onclick: () => Ops.toggle(A, prop, title) }, U.icon(icon, 'sm'));
+      wrap.append(U.el('div', { class: 'lp-top' }, this.blendSelect(A, 'input lp-sel'), U.el('label', { class: 'lp-op', title: 'Непрозрачность слоя' }, 'Непрозр.', op, opn)),
+        U.el('div', { class: 'lp-top' }, U.el('small', { text: 'Закрепить:' }), lk('alphalock', 'alphaLock', 'Защита прозрачности'), lk('lock', 'locked', 'Блокировка слоя'), lk('clip', 'clip', 'Обтравочная маска'),
+          U.el('div', { class: 'grow' }), U.el('small', { text: `${n}/${d.maxLayers}` })));
+    }
     for (let p = 0; p < n; p++) { const i = n - 1 - p; wrap.append(this.layerRow(d.layers[i], i)); if (this.expanded === d.layers[i].id) wrap.append(this.layerProps(d.layers[i])); }
     const bgIn = U.el('input', { type: 'color', value: d.bg, style: { position: 'absolute', opacity: 0, width: '1px', height: '1px' } });
     bgIn.addEventListener('change', () => this.setBg(bgIn.value, d.bgVisible));
@@ -18,7 +38,11 @@ const Panels = {
       U.el('div', { class: 'nm', onclick: () => bgIn.click() }, 'Цвет фона', U.el('small', { text: d.bg.toUpperCase() })),
       U.el('button', { class: 'vis' + (d.bgVisible ? '' : ' off'), title: 'Показать/скрыть фон', onclick: () => this.setBg(d.bg, !d.bgVisible) }, U.icon(d.bgVisible ? 'eye' : 'eyeoff', 'sm')));
     wrap.append(bg);
-    wrap.append(U.el('div', { class: 'row', html: `<small>${n} из ${d.maxLayers} слоёв · коснитесь активного слоя для меню</small>` }));
+    const fb = (icon, title, fn) => U.el('button', { class: 'lp-b', title, onclick: () => { Tools.commitPending(); fn(); } }, U.icon(icon, 'sm'));
+    wrap.append(U.el('div', { class: 'lp-foot' },
+      fb('plus', 'Новый слой', () => Ops.add()), fb('copy', 'Дублировать слой', () => Ops.duplicate()), fb('merge', 'Объединить с нижним', () => Ops.mergeDown()),
+      fb('select', 'Выделить по содержимому слоя', () => Sel.fromLayer(d.layer)), fb('more', 'Ещё действия со слоем', () => this.layerMenu(d.layer, d.active)), U.el('div', { class: 'grow' }),
+      fb('trash', 'Удалить слой', () => Ops.remove())));
     return wrap;
   },
   setBg(color, vis) {
@@ -74,7 +98,10 @@ const Panels = {
     let before = null;
     box.append(UI.hslider('Непрозрачность', 0, 100, Math.round(L.opacity * 100), 1, v => { if (!before) before = { opacity: L.opacity }; L.opacity = v / 100; Engine.renderAll(); }, v => v + '%', () => { if (before) Ops.propsCommit(L, before, 'Непрозрачность слоя'); before = null; UI.layersChanged(); }));
     const grid = U.el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '3px' } });
-    for (const [id, name] of BLENDS) grid.append(U.el('button', { class: 'btn sm' + (L.blend === id ? ' primary' : ''), text: name, style: { fontSize: '11.5px', padding: '0 4px' }, onclick: () => Ops.setProps(L, { blend: id }, 'Режим наложения') }));
+    BLENDS.forEach(([id, name], i) => {
+      if (BLEND_GROUPS.some(g => g[0] === i && i > 0)) grid.append(U.el('div', { style: { gridColumn: '1/-1', height: '1px', background: 'var(--line)', margin: '2px 0' } }));
+      grid.append(U.el('button', { class: 'btn sm' + (L.blend === id ? ' primary' : ''), text: name, style: { fontSize: '11px', padding: '0 4px', height: 'auto', minHeight: '28px', lineHeight: '1.1' }, onclick: () => Ops.setProps(L, { blend: id }, 'Режим наложения') }));
+    });
     box.append(grid);
     return box;
   },
@@ -137,46 +164,92 @@ const Panels = {
     root.append(cats, list);
     return root;
   },
+  /* общие поля настроек кисти (студия и панель «Настройки кисти») */
+  BRUSH_SECTIONS: [['shape', 'Форма отпечатка'], ['dyn', 'Динамика формы'], ['scatter', 'Рассеивание'], ['grain', 'Текстура'], ['transfer', 'Передача'], ['color', 'Динамика цвета'], ['taper', 'Сглаживание и сужение'], ['pressure', 'Перо и давление'], ['props', 'Свойства']],
+  brushFields(sect, b, changed, rerender) {
+    const out = [], A = (...e) => out.push(...e);
+    const num = (label, key, min, max, step = 0.01, fmt) => UI.hslider(label, min, max, b[key], step, v => { b[key] = v; changed(); }, fmt || (v => (Math.round(v * 100) / 100).toString()));
+    const pct = (label, key, max = 1) => UI.hslider(label, 0, max * 100, Math.round(b[key] * 100), 1, v => { b[key] = v / 100; changed(); }, v => v + '%');
+    const tog = (label, key, sub, on = true, off = false) => UI.sw(label, !!b[key], v => { b[key] = v ? on : off; changed(); }, sub);
+    if (sect === 'shape') {
+      const grid = U.el('div', { class: 'tipgrid' });
+      for (const s of Tips.shapes) {
+        if (s.id === 'image' && !b.tipImage) continue;
+        const c = U.canvas(40, 40), x = c.getContext('2d'), m = Tips.get(s.id, b.hardness, 40, Brushes.tipImage(b));
+        x.drawImage(Tips.tint(m, getComputedStyle(document.body).getPropertyValue('--text').trim() || '#ddd'), 2, 2, 36, 36);
+        grid.append(U.el('button', { class: b.shape === s.id ? 'on' : '', title: s.name, onclick: () => { b.shape = s.id; changed(); rerender && rerender(); } }, c));
+      }
+      A(grid, U.el('button', { class: 'btn sm', text: 'Форма из изображения…', style: { margin: '4px 8px' }, onclick: async () => { const [f] = await U.pickFile('image/*'); if (!f) return; const img = await U.loadImage(f); const c = U.canvas(256, 256); const k = Math.min(256 / img.width, 256 / img.height); c.getContext('2d').drawImage(img, (256 - img.width * k) / 2, (256 - img.height * k) / 2, img.width * k, img.height * k); b.tipImage = c.toDataURL('image/png'); b.shape = 'image'; Brushes.prepare(b); setTimeout(() => { changed(); rerender && rerender(); }, 80); } }),
+        pct('Жёсткость', 'hardness'), pct('Интервал', 'spacing', 2.5), pct('Округлость', 'roundness'), num('Угол, °', 'angle', -180, 180, 1, v => v + '°'), tog('Поворачивать по направлению штриха', 'follow'));
+    }
+    if (sect === 'dyn') A(pct('Колебание размера', 'jSize'), pct('Нажим → размер', 'pSize'), pct('Минимальный диаметр', 'minSize'), num('Наклон пера → размер', 'tiltSize', 0, 4, 0.1), pct('Колебание угла', 'jAngle'));
+    if (sect === 'scatter') A(pct('Рассеивание', 'scatter', 3), num('Количество отпечатков', 'count', 1, 8, 1, v => v));
+    if (sect === 'grain') {
+      const sel = U.el('select', { class: 'input', style: { margin: '4px 0' }, onchange: () => { b.grain = sel.value || null; b.grainImage = null; changed(); } });
+      sel.append(U.el('option', { value: '', text: 'Без текстуры', selected: !b.grain }));
+      for (const g of Grains.list) sel.append(U.el('option', { value: g.id, text: g.name, selected: g.id === b.grain && !b.grainImage }));
+      if (b.grainImage) sel.append(U.el('option', { value: 'custom', text: 'Своя текстура', selected: true }));
+      A(U.el('div', { class: 'field', style: { padding: '0 8px' } }, sel),
+        U.el('button', { class: 'btn sm', text: 'Своя текстура из изображения…', style: { margin: '0 8px 4px' }, onclick: async () => { const [f] = await U.pickFile('image/*'); if (!f) return; const img = await U.loadImage(f); const c = U.canvas(256, 256); c.getContext('2d').drawImage(img, 0, 0, 256, 256); b.grainImage = c.toDataURL('image/png'); b.grain = 'custom'; Grains.addImage('img_' + b.id, c); changed(); rerender && rerender(); } }),
+        num('Масштаб', 'grainScale', 0.2, 4, 0.05), pct('Глубина', 'grainStrength'));
+    }
+    if (sect === 'transfer') A(pct('Нажим (поток)', 'flow'), pct('Нажим пера → плотность', 'pFlow'), pct('Колебание непрозрачности', 'jOpacity'), pct('Непрозрачность по умолчанию', 'opacity'));
+    if (sect === 'color') A(pct('Колебание цветового тона', 'jHue'), pct('Колебание насыщенности', 'jSat'), pct('Колебание яркости', 'jBri'));
+    if (sect === 'taper') A(pct('Сглаживание линии', 'streamline'), num('Сужение в начале (в размерах кисти)', 'taperStart', 0, 30, 0.5), num('Сужение в конце', 'taperEnd', 0, 30, 0.5), pct('Толщина на концах', 'taperMin'));
+    if (sect === 'pressure') A(pct('Нажим → размер', 'pSize'), pct('Нажим → плотность', 'pFlow'), pct('Минимальный размер', 'minSize'), num('Наклон пера → размер', 'tiltSize', 0, 4, 0.1),
+      UI.hslider('Кривая нажима (общая): мягко ← → жёстко', 40, 250, Math.round(Settings.pressureGamma * 100), 1, v => { Settings.pressureGamma = v / 100; Settings.save(); changed(); }, v => (v / 100).toFixed(2)));
+    if (sect === 'props') {
+      const name = U.el('input', { class: 'input', value: b.name, oninput: () => { b.name = name.value; changed(); } });
+      A(U.el('div', { class: 'field', style: { padding: '0 8px' } }, U.el('label', { text: 'Название' }), name),
+        num('Минимальный размер, px', 'sizeMin', 0.5, 50, 0.5), num('Максимальный размер, px', 'sizeMax', 1, 1000, 1),
+        pct('Сила размазывания (палец)', 'smudge'), tog('Режим «Добавление» (свечение)', 'blend', 'Цвета складываются, как свет', 'lighter', null), tog('Пиксельная кисть', 'pixel', 'Без сглаживания, квадратные пиксели'));
+    }
+    return out;
+  },
+  /* панель дока «Настройки кисти» — правит текущую кисть сразу */
+  brushSettings() {
+    const orig = Tools.brush(), id = orig.id, b = JSON.parse(JSON.stringify(Object.assign({}, orig, { _merged: undefined, _v: undefined })));
+    const root = U.el('div', { class: 'bset' });
+    const pv = U.el('div', { class: 'bset-pv' });
+    const drawPv = () => { pv.innerHTML = ''; const c = Brushes.sample(b, 260, 54, Colors.rgb()); c.style.width = '100%'; c.style.height = '54px'; pv.append(c); };
+    const save = U.debounce(() => { Brushes.update(id, strip(b)); Panels.samples.clear(); Desk.renderOptions(); }, 250);
+    const strip = o => { const c = Object.assign({}, o); delete c.id; delete c.preset; delete c._merged; delete c._v; return c; };
+    const pvT = U.rafThrottle(drawPv);
+    const changed = () => { pvT(); save(); };
+    root.append(U.el('div', { class: 'row', style: { padding: '2px 4px' } }, U.el('b', { class: 'grow', text: b.name + (Brushes.isModified(id) ? ' •' : '') }),
+      b.preset && Brushes.isModified(id) ? U.el('button', { class: 'btn sm', text: 'Сбросить', onclick: () => { Brushes.reset(id); Panels.samples.clear(); UI.toolChanged(); } }) : null,
+      U.el('button', { class: 'btn sm', text: 'Студия…', onclick: () => this.studio(id) })), pv);
+    this.bsetOpen = this.bsetOpen || { shape: true };
+    for (const [k, n] of this.BRUSH_SECTIONS) {
+      const open = !!this.bsetOpen[k];
+      const body = U.el('div', { class: 'bset-b' + (open ? '' : ' hidden') });
+      const head = U.el('button', { class: 'bset-h' }, U.el('span', { text: open ? '▾' : '▸' }), n);
+      head.onclick = () => { this.bsetOpen[k] = !this.bsetOpen[k]; body.classList.toggle('hidden'); head.firstChild.textContent = this.bsetOpen[k] ? '▾' : '▸'; if (this.bsetOpen[k] && !body.childNodes.length) body.append(...this.brushFields(k, b, changed, () => Desk.refreshPanel('brushset'))); };
+      if (open) body.append(...this.brushFields(k, b, changed, () => { save(); setTimeout(() => Desk.refreshPanel('brushset'), 300); }));
+      root.append(head, body);
+    }
+    drawPv();
+    return root;
+  },
+  /* панель «История» */
+  history() {
+    const box = U.el('div', { class: 'hist' });
+    const items = [{ name: 'Исходное состояние' }].concat(History.list);
+    items.forEach((e, i) => box.append(U.el('div', { class: 'hist-i' + (i === History.pos ? ' on' : '') + (i > History.pos ? ' fut' : ''), text: e.name, onclick: () => History.goto(i) })));
+    setTimeout(() => { const on = box.querySelector('.on'); on && on.scrollIntoView({ block: 'nearest' }); }, 0);
+    return box;
+  },
   studio(id) {
     const orig = Brushes.get(id), b = JSON.parse(JSON.stringify(Object.assign({}, orig, { _merged: undefined, _v: undefined })));
-    let sect = 'stroke';
+    let sect = 'shape';
     const nav = U.el('div', { class: 'snav' }), body = U.el('div', { class: 'sbody' }), pad = U.el('div', { class: 'spad' });
-    const S = [['stroke', 'Штрих'], ['taper', 'Сужение'], ['shape', 'Форма'], ['grain', 'Зерно'], ['dyn', 'Динамика'], ['pressure', 'Давление и наклон'], ['color', 'Цветовая динамика'], ['props', 'Свойства'], ['about', 'О кисти']];
+    const S = this.BRUSH_SECTIONS.concat([['about', 'О кисти']]);
     const pv = U.el('canvas'), padCtx = pv.getContext('2d');
-    const num = (label, key, min, max, step = 0.01, fmt) => UI.hslider(label, min, max, b[key], step, v => { b[key] = v; preview(); }, fmt || (v => (Math.round(v * 100) / 100).toString()));
-    const pct = (label, key, max = 1) => UI.hslider(label, 0, max * 100, Math.round(b[key] * 100), 1, v => { b[key] = v / 100; preview(); }, v => v + '%');
-    const tog = (label, key, sub) => UI.sw(label, !!b[key], v => { b[key] = v; preview(); }, sub);
     const render = () => {
       nav.innerHTML = ''; body.innerHTML = '';
       for (const [k, n] of S) nav.append(U.el('button', { class: sect === k ? 'on' : '', text: n, onclick: () => { sect = k; render(); } }));
       const A = (...e) => body.append(...e);
-      if (sect === 'stroke') A(pct('Интервал', 'spacing', 2.5), pct('Сглаживание (StreamLine)', 'streamline'), pct('Разброс', 'scatter', 3), num('Количество отпечатков', 'count', 1, 8, 1, v => v), pct('Колебание размера', 'jSize'), pct('Колебание непрозрачности', 'jOpacity'));
-      if (sect === 'taper') A(num('Сужение в начале (в размерах кисти)', 'taperStart', 0, 30, 0.5), num('Сужение в конце', 'taperEnd', 0, 30, 0.5), pct('Минимальная толщина на концах', 'taperMin'));
-      if (sect === 'shape') {
-        const sel = U.el('select', { class: 'input', onchange: () => { b.shape = sel.value; preview(); } });
-        for (const s of Tips.shapes) sel.append(U.el('option', { value: s.id, text: s.name, selected: s.id === b.shape }));
-        A(U.el('div', { class: 'field' }, U.el('label', { text: 'Источник формы' }), sel),
-          U.el('button', { class: 'btn sm', text: 'Импорт формы из изображения…', onclick: async () => { const [f] = await U.pickFile('image/*'); if (!f) return; const img = await U.loadImage(f); const c = U.canvas(256, 256); const k = Math.min(256 / img.width, 256 / img.height); c.getContext('2d').drawImage(img, (256 - img.width * k) / 2, (256 - img.height * k) / 2, img.width * k, img.height * k); b.tipImage = c.toDataURL('image/png'); b.shape = 'image'; Brushes.prepare(b); setTimeout(() => { render(); preview(); }, 60); } }),
-          pct('Жёсткость', 'hardness'), pct('Округлость', 'roundness'), num('Угол, °', 'angle', -180, 180, 1, v => v + '°'), pct('Случайный поворот', 'jAngle'), tog('Поворачивать по направлению штриха', 'follow'));
-      }
-      if (sect === 'grain') {
-        const sel = U.el('select', { class: 'input', onchange: () => { b.grain = sel.value || null; b.grainImage = null; preview(); } });
-        sel.append(U.el('option', { value: '', text: 'Без зерна', selected: !b.grain }));
-        for (const g of Grains.list) sel.append(U.el('option', { value: g.id, text: g.name, selected: g.id === b.grain && !b.grainImage }));
-        A(U.el('div', { class: 'field' }, U.el('label', { text: 'Текстура' }), sel),
-          U.el('button', { class: 'btn sm', text: 'Импорт текстуры…', onclick: async () => { const [f] = await U.pickFile('image/*'); if (!f) return; const img = await U.loadImage(f); const c = U.canvas(256, 256); c.getContext('2d').drawImage(img, 0, 0, 256, 256); b.grainImage = c.toDataURL('image/png'); b.grain = 'custom'; Grains.addImage('img_' + b.id, c); preview(); } }),
-          num('Масштаб', 'grainScale', 0.2, 4, 0.05), pct('Сила', 'grainStrength'));
-      }
-      if (sect === 'dyn') A(pct('Колебание размера', 'jSize'), pct('Колебание непрозрачности', 'jOpacity'), pct('Случайный поворот', 'jAngle'), pct('Разброс', 'scatter', 3));
-      if (sect === 'pressure') A(pct('Давление → размер', 'pSize'), pct('Давление → плотность', 'pFlow'), pct('Минимальный размер', 'minSize'), num('Наклон пера → размер', 'tiltSize', 0, 4, 0.1),
-        UI.hslider('Кривая давления (общая): мягко ← → жёстко', 40, 250, Math.round(Settings.pressureGamma * 100), 1, v => { Settings.pressureGamma = v / 100; Settings.save(); preview(); }, v => (v / 100).toFixed(2)));
-      if (sect === 'color') A(pct('Колебание тона', 'jHue'), pct('Колебание насыщенности', 'jSat'), pct('Колебание яркости', 'jBri'));
-      if (sect === 'props') {
-        const name = U.el('input', { class: 'input', value: b.name, oninput: () => { b.name = name.value; } });
-        A(U.el('div', { class: 'field' }, U.el('label', { text: 'Название' }), name),
-          num('Минимальный размер, px', 'sizeMin', 0.5, 50, 0.5), num('Максимальный размер, px', 'sizeMax', 1, 1000, 1), pct('Плотность (поток)', 'flow'), pct('Непрозрачность по умолчанию', 'opacity'),
-          pct('Сила размазывания (для пальца)', 'smudge'), tog('Режим «Добавление» (свечение)', 'blend', 'Цвета складываются, как свет'), tog('Пиксельная кисть', 'pixel', 'Без сглаживания, квадратные пиксели'));
-      }
+      if (sect !== 'about') A(...this.brushFields(sect, b, () => preview(), () => render()));
       if (sect === 'about') A(U.el('div', { class: 'row', html: `<div><b>${b.name}</b><br><small>${b.preset ? 'Встроенная кисть' + (Brushes.isModified(b.id) ? ' (изменена)' : '') : 'Пользовательская кисть'}</small></div>` }),
         U.el('div', { class: 'row', style: { flexWrap: 'wrap' } },
           U.el('button', { class: 'btn sm', text: 'Дублировать', onclick: () => { Brushes.update(id, strip(b)); const c = Brushes.duplicate(id); close(); this.pickBrush(c); this.studio(c.id); } }),
@@ -263,7 +336,17 @@ const Panels = {
         it('film', 'Экспорт таймлапса — полностью', () => Timelapse.export(false)); it('film', 'Экспорт таймлапса — 30 секунд', () => Timelapse.export(true));
         it('trash', 'Очистить запись таймлапса', async () => { if (await U.confirm('Очистить таймлапс?', 'Записанные кадры будут удалены.', 'Очистить', true)) Timelapse.clear(); });
         break;
-      case 'prefs':
+      case 'prefs': body.append(this.prefsBody()); break;
+      case 'help': body.append(this.helpBody()); break;
+    }
+    return root;
+  },
+  prefsDialog() { U.dialog({ title: 'Настройки', body: this.prefsBody(), cls: 'wide', buttons: [{ text: 'Готово', primary: true, value: true }] }); },
+  prefsBody() {
+    const body = U.el('div');
+    body.append(U.el('div', { class: 'sect', text: 'Интерфейс' }), U.el('div', { style: { padding: '0 8px' } }, UI.seg([['auto', 'Автоматически'], ['desk', 'Настольный (меню и панели)'], ['touch', 'Планшетный']], Settings.uiMode || 'auto', v => { Settings.uiMode = v; Settings.save(); UI.applyLayout(); })));
+    {
+      {
         body.append(UI.sw('Светлая тема', Settings.theme === 'light', v => { Settings.theme = v ? 'light' : 'dark'; Settings.save(); App.applyTheme(); }));
         body.append(UI.sw('Интерфейс для левши', Settings.lefty, v => { Settings.lefty = v; Settings.save(); App.applyTheme(); }, 'Панели меняются местами'));
         body.append(UI.sw('Рисование пальцем', Settings.touchDraw, v => { Settings.touchDraw = v; Settings.save(); }, 'Выключите, если рисуете только стилусом — палец будет двигать холст'));
@@ -279,20 +362,20 @@ const Panels = {
         body.append(UI.sw('Привязка поворота к 90°', Settings.rotateSnap, v => { Settings.rotateSnap = v; Settings.save(); }));
         body.append(UI.sw('Пипетка берёт цвет только с текущего слоя', Settings.pickSource === 'layer', v => { Settings.pickSource = v ? 'layer' : 'all'; Settings.save(); }));
         body.append(UI.hslider('Память для отмены', 128, 2048, Settings.historyMB, 64, v => { Settings.historyMB = v; }, v => v + ' МБ', () => Settings.save()));
-        break;
-      case 'help': body.append(this.helpBody()); break;
+      }
     }
-    return root;
+    return body;
   },
   helpBody() {
     const rows = [
       ['Жесты', ''], ['2 пальца — касание', 'Отменить'], ['3 пальца — касание', 'Повторить'], ['4 пальца — касание', 'Скрыть/показать интерфейс'],
       ['2 пальца — движение', 'Сдвиг, масштаб и поворот холста'], ['Быстрое сведение', 'Вписать холст в экран'], ['Удержание пальца/пера', 'Пипетка'],
       ['Задержка в конце штриха', 'Быстрая фигура: линия, эллипс, многоугольник'], ['Перетащить цвет на холст', 'Заливка области'], ['Заливка + движение вбок', 'Порог заливки'],
-      ['Клавиатура', ''], ['B / S / E', 'Кисть / Палец / Ластик'], ['G / I / L / V / T', 'Заливка / Пипетка / Выделение / Трансформ / Текст'],
-      ['[ и ]', 'Размер кисти'], ['1…0 (с Shift)', 'Непрозрачность 10–100%'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / Повторить'],
+      ['Клавиатура', ''], ['B / E / R / S', 'Кисть / Ластик / Палец / Штамп'], ['G / Shift+G', 'Заливка / Градиент'], ['I / M / L / W', 'Пипетка / Выделение / Лассо / Волшебная палочка'],
+      ['V / T / U / H / Z', 'Трансформация / Текст / Фигуры / Рука / Масштаб'], ['X / D', 'Поменять цвета / Чёрный и белый'],
+      ['[ и ]', 'Размер кисти'], ['Shift+1…0', 'Непрозрачность 10–100%'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / Повторить'], ['Ctrl+T', 'Свободное трансформирование'],
       ['Пробел + перетаскивание', 'Сдвиг холста'], ['Колесо мыши / Ctrl+колесо', 'Масштаб'], ['Alt+колесо', 'Поворот'], ['Alt или ПКМ', 'Пипетка'],
-      ['0 / 1 / H', 'Вписать / 100% / Зеркальный вид'], ['Ctrl+Shift+N', 'Новый слой'], ['Ctrl+J', 'Дублировать слой'], ['Ctrl+E', 'Объединить вниз'],
+      ['Ctrl+0 / Ctrl+1 / F', 'Вписать / 100% / Зеркальный вид'], ['Ctrl+N / Ctrl+O', 'Новый холст / Открыть'], ['Ctrl+Shift+N', 'Новый слой'], ['Ctrl+J', 'Дублировать слой (или копию выделения)'], ['Ctrl+E', 'Объединить вниз'],
       ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', 'Выделить всё / Снять / Инвертировать'], ['Ctrl+C / X / V', 'Копировать / Вырезать / Вставить'],
       ['Delete', 'Очистить слой или выделение'], ['Enter / Esc', 'Применить / Отменить трансформацию'], ['Tab', 'Скрыть интерфейс'], ['Ctrl+S', 'Сохранить']
     ];

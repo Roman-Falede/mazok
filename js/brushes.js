@@ -111,7 +111,11 @@ const Tips = (() => {
   const shapes = [
     { id: 'round', name: 'Круглая' }, { id: 'square', name: 'Квадратная' }, { id: 'chalk', name: 'Меловая' }, { id: 'bristle', name: 'Ворс' },
     { id: 'rake', name: 'Гребёнка' }, { id: 'spray', name: 'Распыление' }, { id: 'splatter', name: 'Клякса' }, { id: 'sponge', name: 'Губка' },
-    { id: 'star', name: 'Звезда' }, { id: 'leaf', name: 'Лист' }, { id: 'hatch', name: 'Штрихи' }, { id: 'image', name: 'Из изображения' }
+    { id: 'star', name: 'Звезда' }, { id: 'leaf', name: 'Лист' }, { id: 'hatch', name: 'Штрихи' },
+    { id: 'grass', name: 'Трава' }, { id: 'hair', name: 'Волоски' }, { id: 'fur', name: 'Мех' }, { id: 'cloud', name: 'Облако' }, { id: 'rock', name: 'Камень' },
+    { id: 'blot', name: 'Клякса туши' }, { id: 'drybrush', name: 'Сухая кисть' }, { id: 'triangle', name: 'Треугольник' }, { id: 'heart', name: 'Сердце' },
+    { id: 'snowflake', name: 'Снежинка' }, { id: 'ring', name: 'Кольцо' }, { id: 'petal', name: 'Лепесток' }, { id: 'cross', name: 'Крест' },
+    { id: 'image', name: 'Из изображения' }
   ];
   const level = s => { for (const l of LV) if (l >= s) return l; return 512; };
   function softDot(x, cx, cy, r, a) {
@@ -195,6 +199,65 @@ const Tips = (() => {
         x.lineWidth = Math.max(1, S * 0.06); x.lineCap = 'round';
         for (let i = 0; i < 5; i++) { const o = S * (0.12 + i * 0.19); x.beginPath(); x.moveTo(o - S * 0.1, S * 0.9); x.lineTo(o + S * 0.1, S * 0.1); x.stroke(); }
         break;
+      case 'grass':
+        for (let k = 0; k < 11; k++) {
+          const bx = R + (r() - 0.5) * S * 0.55, by = S * 0.99, tx = bx + (r() - 0.5) * S * 0.6, ty = S * (0.03 + 0.45 * r()), w = S * (0.018 + 0.02 * r());
+          const cx = (bx + tx) / 2 + (r() - 0.5) * S * 0.15, cy = (by + ty) / 2;
+          x.globalAlpha = 0.6 + 0.4 * r(); x.beginPath(); x.moveTo(bx - w, by); x.quadraticCurveTo(cx - w * 0.5, cy, tx, ty); x.quadraticCurveTo(cx + w * 0.5, cy, bx + w, by); x.fill();
+        }
+        break;
+      case 'hair':
+        for (let i = 0; i < 26; i++) { const y = S * (0.04 + 0.92 * i / 25) + (r() - 0.5) * S * 0.02; x.globalAlpha = 0.25 + 0.75 * r(); x.beginPath(); x.arc(R + (r() - 0.5) * S * 0.05, y, Math.max(0.5, S * (0.008 + 0.012 * r())), 0, 7); x.fill(); }
+        break;
+      case 'fur':
+        x.lineCap = 'round';
+        for (let k = 0; k < 70; k++) {
+          const a = r() * Math.PI * 2, r0 = R * 0.1 * r(), r1 = R * (0.55 + 0.42 * r());
+          x.globalAlpha = 0.3 + 0.6 * r(); x.lineWidth = Math.max(0.6, S * 0.012);
+          x.beginPath(); x.moveTo(R + Math.cos(a) * r0, R + Math.sin(a) * r0); x.lineTo(R + Math.cos(a + (r() - 0.5) * 0.3) * r1, R + Math.sin(a + (r() - 0.5) * 0.3) * r1); x.stroke();
+        }
+        break;
+      case 'cloud':
+        for (let k = 0; k < 9; k++) { const a = r() * Math.PI * 2, d = R * 0.35 * Math.sqrt(r()); softDot(x, R + Math.cos(a) * d, R + Math.sin(a) * d * 0.7, R * (0.3 + 0.25 * r()), 0.45 + 0.4 * r()); }
+        break;
+      case 'rock': {
+        x.beginPath(); const n = 8;
+        for (let i = 0; i < n; i++) { const a = i / n * Math.PI * 2, rr = R * (0.6 + 0.35 * r()); x.lineTo(R + Math.cos(a) * rr, R + Math.sin(a) * rr); }
+        x.closePath(); x.fill();
+        perPixel(x, S, (u, v, a) => a * (0.55 + 0.45 * Noise.value(u * 12, v * 12, 17)));
+        break;
+      }
+      case 'blot':
+        perPixel(x, S, (u, v) => {
+          const d = Math.hypot(u - 0.5, v - 0.5) * 2, n = Noise.value(u * 5, v * 5, 23) * 0.6 + Noise.value(u * 14, v * 14, 29) * 0.4;
+          return U.smooth((1 - d) * 2.2 + (n - 0.5) * 1.6);
+        });
+        break;
+      case 'drybrush':
+        for (let i = 0; i < 30; i++) { if (r() < 0.3) continue; const y = S * (0.03 + 0.94 * i / 29); softDot(x, R + (r() - 0.5) * S * 0.1, y, R * (0.03 + 0.05 * r()), 0.25 + 0.75 * r()); }
+        break;
+      case 'triangle':
+        x.beginPath(); x.moveTo(R, S * 0.06); x.lineTo(S * 0.95, S * 0.9); x.lineTo(S * 0.05, S * 0.9); x.closePath(); x.fill(); break;
+      case 'heart':
+        x.beginPath(); x.moveTo(R, S * 0.92);
+        x.bezierCurveTo(S * 0.1, S * 0.62, S * 0.0, S * 0.3, S * 0.27, S * 0.16); x.bezierCurveTo(S * 0.42, S * 0.08, R, S * 0.22, R, S * 0.3);
+        x.bezierCurveTo(R, S * 0.22, S * 0.58, S * 0.08, S * 0.73, S * 0.16); x.bezierCurveTo(S * 1.0, S * 0.3, S * 0.9, S * 0.62, R, S * 0.92); x.fill(); break;
+      case 'snowflake':
+        x.lineCap = 'round'; x.lineWidth = Math.max(1, S * 0.06);
+        for (let i = 0; i < 6; i++) {
+          const a = i * Math.PI / 3, c = Math.cos(a), s = Math.sin(a), L1 = R * 0.92;
+          x.beginPath(); x.moveTo(R, R); x.lineTo(R + c * L1, R + s * L1);
+          for (const t of [0.45, 0.7]) { const px = R + c * L1 * t, py = R + s * L1 * t, l = R * 0.22; for (const sg of [-1, 1]) { const b = a + sg * 0.7; x.moveTo(px, py); x.lineTo(px + Math.cos(b) * l, py + Math.sin(b) * l); } }
+          x.stroke();
+        }
+        break;
+      case 'ring':
+        x.lineWidth = Math.max(1, S * 0.1); x.beginPath(); x.arc(R, R, R * 0.85, 0, Math.PI * 2); x.stroke(); break;
+      case 'petal':
+        x.beginPath(); x.moveTo(R, S * 0.04); x.bezierCurveTo(S * 0.98, S * 0.25, S * 0.85, S * 0.9, R, S * 0.97); x.bezierCurveTo(S * 0.15, S * 0.9, S * 0.02, S * 0.25, R, S * 0.04); x.fill(); break;
+      case 'cross':
+        x.lineCap = 'round'; x.lineWidth = Math.max(1, S * 0.1);
+        x.beginPath(); x.moveTo(S * 0.15, S * 0.15); x.lineTo(S * 0.85, S * 0.85); x.moveTo(S * 0.85, S * 0.15); x.lineTo(S * 0.15, S * 0.85); x.stroke(); break;
       case 'image':
         if (img && img.width) {
           const k = Math.min(S / img.width, S / img.height), w = img.width * k, h = img.height * k;
@@ -254,7 +317,7 @@ const BRUSH_BASE = {
 };
 const BRUSH_CATS = [
   { id: 'sketch', name: 'Эскиз' }, { id: 'ink', name: 'Тушь' }, { id: 'paint', name: 'Живопись' }, { id: 'air', name: 'Аэрограф' },
-  { id: 'texture', name: 'Текстура' }, { id: 'fx', name: 'Декор' }, { id: 'pixel', name: 'Пиксель' }, { id: 'custom', name: 'Мои кисти' }
+  { id: 'texture', name: 'Текстура' }, { id: 'nature', name: 'Природа' }, { id: 'fx', name: 'Декор' }, { id: 'pixel', name: 'Пиксель' }, { id: 'custom', name: 'Мои кисти' }
 ];
 const BRUSH_PRESETS = [
   ['pencil_hb', 'Карандаш HB', 'sketch', { shape: 'chalk', hardness: 0.9, spacing: 0.1, sizeMax: 24, size: 0.22, flow: 0.55, pFlow: 0.8, pSize: 0.35, grain: 'paper', grainStrength: 0.75, streamline: 0.12 }],
@@ -288,7 +351,56 @@ const BRUSH_PRESETS = [
   ['dots', 'Пунктир', 'fx', { hardness: 1, spacing: 2.2, sizeMax: 60, size: 0.2, pSize: 0.3, pFlow: 0 }],
   ['hatching', 'Штриховка', 'fx', { shape: 'hatch', hardness: 1, spacing: 0.45, sizeMax: 120, size: 0.3, pSize: 0.3, pFlow: 0.3, streamline: 0.3 }],
   ['pixel', 'Пиксель', 'pixel', { pixel: true, shape: 'square', sizeMin: 1, sizeMax: 32, size: 0, spacing: 0.5, pSize: 0, pFlow: 0, flow: 1, streamline: 0 }],
-  ['pixel_p', 'Пиксель с нажимом', 'pixel', { pixel: true, shape: 'square', sizeMin: 1, sizeMax: 64, size: 0.2, spacing: 0.5, pSize: 0.8, pFlow: 0, flow: 1, streamline: 0 }]
+  ['pixel_p', 'Пиксель с нажимом', 'pixel', { pixel: true, shape: 'square', sizeMin: 1, sizeMax: 64, size: 0.2, spacing: 0.5, pSize: 0.8, pFlow: 0, flow: 1, streamline: 0 }],
+  /* --- расширенный набор --- */
+  ['pencil_2h', 'Карандаш 2H', 'sketch', { shape: 'chalk', hardness: 0.95, spacing: 0.1, sizeMax: 14, size: 0.25, flow: 0.35, pFlow: 0.85, pSize: 0.2, grain: 'paper', grainStrength: 0.8, streamline: 0.12 }],
+  ['pencil_soft', 'Мягкий карандаш', 'sketch', { shape: 'chalk', hardness: 0.75, spacing: 0.08, sizeMax: 60, size: 0.3, flow: 0.45, pFlow: 0.75, pSize: 0.45, grain: 'paper', grainStrength: 0.55, grainScale: 1.5, tiltSize: 1.2 }],
+  ['color_pencil', 'Цветной карандаш', 'sketch', { shape: 'chalk', hardness: 0.9, spacing: 0.08, sizeMax: 30, size: 0.3, flow: 0.6, pFlow: 0.7, pSize: 0.3, grain: 'paper', grainStrength: 0.7, grainScale: 0.8, streamline: 0.15 }],
+  ['sketch_marker', 'Скетч-маркер', 'sketch', { shape: 'square', hardness: 0.9, roundness: 0.55, follow: true, spacing: 0.05, sizeMax: 70, size: 0.35, flow: 0.4, pFlow: 0.2, pSize: 0.1, opacity: 0.8, streamline: 0.3 }],
+  ['ballpoint', 'Шариковая ручка', 'sketch', { hardness: 0.95, spacing: 0.06, sizeMax: 8, size: 0.4, flow: 0.7, pFlow: 0.6, pSize: 0.25, streamline: 0.3 }],
+  ['sanguine', 'Сангина', 'sketch', { shape: 'chalk', roundness: 0.6, follow: true, spacing: 0.07, sizeMax: 70, size: 0.3, flow: 0.55, pFlow: 0.8, pSize: 0.3, grain: 'charcoal', grainStrength: 0.65 }],
+  ['fineliner', 'Тонкий линер', 'ink', { hardness: 1, spacing: 0.04, sizeMax: 12, size: 0.3, pSize: 0.1, pFlow: 0, streamline: 0.5 }],
+  ['gpen', 'G-перо', 'ink', { hardness: 1, spacing: 0.035, sizeMax: 30, size: 0.3, pSize: 1, minSize: 0.02, pFlow: 0, taperStart: 4, taperEnd: 6, taperMin: 0.02, streamline: 0.45 }],
+  ['marker', 'Маркер', 'ink', { shape: 'square', hardness: 0.95, roundness: 0.5, follow: true, spacing: 0.04, sizeMax: 90, size: 0.35, flow: 0.9, pFlow: 0, pSize: 0, opacity: 0.85, streamline: 0.3 }],
+  ['felt_pen', 'Фломастер', 'ink', { hardness: 0.85, spacing: 0.05, sizeMax: 40, size: 0.3, flow: 0.8, pFlow: 0.2, pSize: 0.15, streamline: 0.35 }],
+  ['wet_ink', 'Мокрая тушь', 'ink', { shape: 'blot', hardness: 1, spacing: 0.08, sizeMax: 80, size: 0.3, pSize: 0.9, minSize: 0.05, pFlow: 0.1, jSize: 0.1, taperStart: 2, taperEnd: 3, streamline: 0.35 }],
+  ['flat_nib', 'Плоское перо', 'ink', { shape: 'square', hardness: 1, roundness: 0.15, angle: 30, spacing: 0.03, sizeMax: 70, size: 0.3, pSize: 0.3, pFlow: 0, streamline: 0.45 }],
+  ['comic_ink', 'Комиксная тушь', 'ink', { hardness: 0.98, spacing: 0.035, sizeMax: 45, size: 0.3, pSize: 0.9, minSize: 0.04, pFlow: 0, taperStart: 8, taperEnd: 10, taperMin: 0.03, streamline: 0.6 }],
+  ['acrylic', 'Акрил', 'paint', { shape: 'bristle', follow: true, spacing: 0.05, sizeMax: 140, size: 0.3, flow: 0.95, pFlow: 0.3, pSize: 0.4, grain: 'canvas', grainStrength: 0.25, smudge: 0.65 }],
+  ['impasto', 'Импасто', 'paint', { shape: 'rake', follow: true, spacing: 0.03, sizeMax: 160, size: 0.35, flow: 1, pFlow: 0.2, pSize: 0.3, grain: 'canvas', grainStrength: 0.55, grainScale: 1.4, smudge: 0.85 }],
+  ['dry_brush', 'Сухая кисть', 'paint', { shape: 'drybrush', follow: true, spacing: 0.03, sizeMax: 150, size: 0.35, flow: 0.7, pFlow: 0.6, pSize: 0.35, grain: 'paper', grainStrength: 0.45, smudge: 0.6 }],
+  ['fan', 'Веерная', 'paint', { shape: 'hair', follow: true, spacing: 0.03, sizeMax: 200, size: 0.35, flow: 0.5, pFlow: 0.6, pSize: 0.3, jOpacity: 0.3, smudge: 0.7 }],
+  ['filbert', 'Овальная кисть', 'paint', { shape: 'bristle', roundness: 0.6, follow: true, spacing: 0.05, sizeMax: 120, size: 0.3, flow: 0.85, pFlow: 0.5, pSize: 0.5, grain: 'canvas', grainStrength: 0.2 }],
+  ['blender', 'Смешивающая', 'paint', { hardness: 0.3, spacing: 0.06, sizeMax: 200, size: 0.35, flow: 0.35, pFlow: 0.7, pSize: 0.3, smudge: 0.92, streamline: 0.2 }],
+  ['wash', 'Акварельная заливка', 'air', { hardness: 0.1, spacing: 0.05, sizeMin: 10, sizeMax: 600, size: 0.45, flow: 0.06, pFlow: 0.6, pSize: 0.3, jSize: 0.15, grain: 'paper', grainStrength: 0.45, grainScale: 2, opacity: 0.8 }],
+  ['mist', 'Дымка', 'air', { shape: 'cloud', hardness: 0.2, spacing: 0.12, sizeMin: 10, sizeMax: 600, size: 0.45, flow: 0.12, pFlow: 0.7, pSize: 0.2, jAngle: 1, jSize: 0.3 }],
+  ['ink_wash', 'Тушевая отмывка', 'air', { shape: 'blot', hardness: 0.3, spacing: 0.1, sizeMax: 300, size: 0.4, flow: 0.15, pFlow: 0.7, pSize: 0.4, jAngle: 1, grain: 'paper', grainStrength: 0.3, opacity: 0.85 }],
+  ['soft_light', 'Мягкий свет', 'air', { hardness: 0, spacing: 0.06, sizeMax: 500, size: 0.4, flow: 0.15, pFlow: 0.8, pSize: 0.1, blend: 'lighter' }],
+  ['neon', 'Неон', 'air', { hardness: 0.8, spacing: 0.04, sizeMax: 60, size: 0.3, flow: 0.8, pFlow: 0.3, pSize: 0.3, blend: 'lighter', streamline: 0.45 }],
+  ['grunge', 'Гранж', 'texture', { shape: 'sponge', spacing: 0.25, jAngle: 1, jSize: 0.4, sizeMin: 8, sizeMax: 400, size: 0.4, flow: 0.6, pSize: 0.2, grain: 'charcoal', grainStrength: 0.5 }],
+  ['crayon', 'Восковой мелок', 'texture', { shape: 'chalk', roundness: 0.8, follow: true, spacing: 0.06, sizeMax: 60, size: 0.3, flow: 0.85, pFlow: 0.4, pSize: 0.3, grain: 'paper', grainStrength: 0.9, grainScale: 0.9 }],
+  ['oil_pastel', 'Масляная пастель', 'texture', { shape: 'chalk', spacing: 0.05, sizeMax: 90, size: 0.3, flow: 0.9, pFlow: 0.3, pSize: 0.35, grain: 'canvas', grainStrength: 0.6, smudge: 0.8 }],
+  ['stipple', 'Пуантилизм', 'texture', { hardness: 0.9, spacing: 0.9, scatter: 1.2, count: 2, jSize: 0.6, sizeMax: 30, size: 0.3, pSize: 0.2, pFlow: 0.4, streamline: 0 }],
+  ['concrete', 'Бетон', 'texture', { shape: 'rock', spacing: 0.35, jAngle: 1, jSize: 0.5, scatter: 0.6, sizeMin: 4, sizeMax: 200, size: 0.35, flow: 0.5, pSize: 0.2, grain: 'noise', grainStrength: 0.5 }],
+  ['grass', 'Трава', 'nature', { shape: 'grass', hardness: 1, spacing: 0.35, jSize: 0.4, scatter: 0.4, jHue: 0.05, jBri: 0.25, sizeMax: 220, size: 0.35, pSize: 0.3, pFlow: 0, streamline: 0 }],
+  ['foliage', 'Крона', 'nature', { shape: 'cloud', hardness: 1, spacing: 0.3, jAngle: 1, jSize: 0.5, scatter: 0.7, jHue: 0.06, jBri: 0.3, sizeMax: 250, size: 0.35, flow: 0.9, pSize: 0.3, pFlow: 0, grain: 'sponge', grainStrength: 0.4 }],
+  ['clouds', 'Облака', 'nature', { shape: 'cloud', spacing: 0.15, jAngle: 1, jSize: 0.35, scatter: 0.3, sizeMin: 20, sizeMax: 700, size: 0.45, flow: 0.3, pFlow: 0.6, pSize: 0.2, streamline: 0.2 }],
+  ['rocks', 'Камни', 'nature', { shape: 'rock', spacing: 0.7, jAngle: 1, jSize: 0.6, scatter: 0.8, jBri: 0.25, sizeMax: 200, size: 0.3, pSize: 0.3, pFlow: 0, streamline: 0 }],
+  ['fur', 'Мех', 'nature', { shape: 'fur', spacing: 0.25, jAngle: 1, jSize: 0.3, sizeMax: 150, size: 0.3, flow: 0.8, pSize: 0.3, jBri: 0.15 }],
+  ['hair', 'Волосы', 'nature', { shape: 'hair', follow: true, spacing: 0.02, sizeMax: 120, size: 0.3, flow: 0.6, pFlow: 0.6, pSize: 0.6, minSize: 0.1, taperStart: 4, taperEnd: 8, streamline: 0.4 }],
+  ['snow', 'Снег', 'nature', { shape: 'snowflake', hardness: 1, spacing: 1.4, scatter: 2, jSize: 0.7, jAngle: 1, jOpacity: 0.4, sizeMax: 60, size: 0.3, pSize: 0.2, pFlow: 0, streamline: 0 }],
+  ['rain', 'Дождь', 'nature', { hardness: 0.6, roundness: 0.06, angle: 75, spacing: 1.3, scatter: 2.2, jSize: 0.5, jOpacity: 0.5, sizeMax: 120, size: 0.3, pSize: 0, pFlow: 0, streamline: 0 }],
+  ['petals', 'Лепестки', 'nature', { shape: 'petal', hardness: 1, spacing: 1, scatter: 1.4, jSize: 0.5, jAngle: 1, jHue: 0.05, jBri: 0.2, sizeMax: 80, size: 0.3, pSize: 0.2, pFlow: 0, streamline: 0 }],
+  ['bark', 'Кора', 'nature', { shape: 'rake', follow: true, spacing: 0.04, sizeMax: 120, size: 0.3, flow: 0.7, pSize: 0.3, grain: 'charcoal', grainStrength: 0.7, grainScale: 1.5, jOpacity: 0.3 }],
+  ['hearts', 'Сердечки', 'fx', { shape: 'heart', hardness: 1, spacing: 1.5, scatter: 1, jSize: 0.5, jAngle: 0.12, jHue: 0.04, sizeMax: 90, size: 0.3, pSize: 0.3, pFlow: 0, streamline: 0 }],
+  ['confetti', 'Конфетти', 'fx', { shape: 'square', hardness: 1, roundness: 0.5, spacing: 1.3, scatter: 2, jSize: 0.6, jAngle: 1, jHue: 1, jSat: 0.2, sizeMax: 50, size: 0.3, pSize: 0.2, pFlow: 0, streamline: 0 }],
+  ['bokeh', 'Боке', 'fx', { hardness: 0.75, spacing: 1.4, scatter: 2, jSize: 0.8, jOpacity: 0.6, flow: 0.5, sizeMax: 200, size: 0.35, pSize: 0.2, pFlow: 0, blend: 'lighter', streamline: 0 }],
+  ['sparkle', 'Искры', 'fx', { shape: 'star', hardness: 1, spacing: 1.6, scatter: 1.5, jSize: 0.8, jAngle: 1, sizeMax: 60, size: 0.3, pSize: 0.2, pFlow: 0, blend: 'lighter', streamline: 0 }],
+  ['rings', 'Кольца', 'fx', { shape: 'ring', hardness: 1, spacing: 1.2, jSize: 0.4, sizeMax: 60, size: 0.3, pSize: 0.2, pFlow: 0, streamline: 0.2 }],
+  ['crosshatch', 'Перекрёстная штриховка', 'fx', { shape: 'cross', hardness: 1, spacing: 0.6, sizeMax: 80, size: 0.3, pSize: 0.3, pFlow: 0.3, grain: 'paper', grainStrength: 0.3 }],
+  ['triangles', 'Треугольники', 'fx', { shape: 'triangle', hardness: 1, spacing: 1.2, scatter: 1.2, jSize: 0.5, jAngle: 1, jBri: 0.2, sizeMax: 80, size: 0.3, pSize: 0.2, pFlow: 0, streamline: 0 }],
+  ['pixel_dither', 'Пиксель-дизеринг', 'pixel', { pixel: true, shape: 'square', sizeMin: 1, sizeMax: 64, size: 0.3, spacing: 0.5, pSize: 0, pFlow: 0, flow: 1, streamline: 0, grain: 'hatch', grainStrength: 1, grainScale: 0.25 }],
+  ['pixel_spray', 'Пиксель-спрей', 'pixel', { pixel: true, shape: 'square', sizeMin: 1, sizeMax: 4, size: 0, spacing: 1.5, scatter: 6, count: 3, pSize: 0, pFlow: 0, flow: 1, streamline: 0 }]
 ].map(([id, name, cat, o]) => Object.assign({}, BRUSH_BASE, { id, name, cat, preset: true }, o));
 
 const Brushes = {
@@ -300,7 +412,8 @@ const Brushes = {
     } catch (e) { }
     for (const b of this.all()) this.prepare(b);
   },
-  persist() { this.version++; Store.kvSet('brushes', { custom: this.custom, overrides: this.overrides }).catch(() => { }); },
+  persist() { this.version++; this._save(); },
+  _save: U.debounce(() => Store.kvSet('brushes', { custom: Brushes.custom, overrides: Brushes.overrides }).catch(() => { }), 500),
   all() { return BRUSH_PRESETS.map(p => this.get(p.id)).concat(this.custom); },
   list(cat) { return cat === 'custom' ? this.custom.slice() : BRUSH_PRESETS.filter(p => p.cat === cat).map(p => this.get(p.id)).concat(this.custom.filter(b => b.cat === cat)); },
   get(id) {

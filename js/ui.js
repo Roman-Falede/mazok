@@ -2,7 +2,7 @@
 /* Мазок — каркас интерфейса: панели, ползунки, всплывающие окна, контекстные панели */
 
 const UI = {
-  openId: null, popEl: null, popDef: null, optKind: null, sliders: {},
+  openId: null, popEl: null, popDef: null, optKind: null, sliders: {}, desk: false,
   build() {
     const tb = U.$('#topbar');
     const B = (act, icon, label, title) => U.el('button', { class: 'tb', 'data-act': act, title: title || label, onclick: e => this.action(act, e.currentTarget) }, U.icon(icon), label ? U.el('span', { text: label }) : null);
@@ -19,17 +19,33 @@ const UI = {
     );
     this.colorDrop(tb.querySelector('[data-act=color]'));
     const rail = U.$('#rail');
-    const tools = [['brush', 'brush', 'Кисть (B)'], ['smudge', 'smudge', 'Палец — растушёвка (S)'], ['eraser', 'eraser', 'Ластик (E)'], null, ['fill', 'fill', 'Заливка (G)'], ['picker', 'picker', 'Пипетка (I, удержание пальца, Alt)'], null, ['select', 'select', 'Выделение (L)'], ['transform', 'move', 'Трансформация (V)'], ['text', 'text', 'Текст (T)']];
+    const tools = [['brush', 'brush', 'Кисть (B)'], ['smudge', 'smudge', 'Палец — растушёвка (R)'], ['eraser', 'eraser', 'Ластик (E)'], null, ['fill', 'fill', 'Заливка (G)'], ['gradient', 'gradient', 'Градиент'], ['picker', 'picker', 'Пипетка (I, удержание пальца, Alt)'], null, ['select', 'select', 'Выделение (M)'], ['transform', 'move', 'Трансформация (V)'], ['text', 'text', 'Текст (T)'], ['shapes', 'shapes', 'Фигуры (U)']];
     for (const t of tools) {
       if (!t) { rail.append(U.el('div', { class: 'rail-sep' })); continue; }
       rail.append(U.el('button', { class: 'tool', 'data-tool': t[0], title: t[2], onclick: e => { if (['brush', 'smudge', 'eraser'].includes(t[0]) && Tools.cur === t[0]) this.toggleBrushLib(e.currentTarget); else Tools.set(t[0]); } }, U.icon(t[1])));
     }
     const sl = U.$('#sliders');
-    this.sliders.size = this.vslider('Размер', v => { Tools.ts().size = v; this.sizePreview(true); }, () => Tools.ts().size, v => { const b = Tools.brush(); return Math.round(Brushes.sizePx(b, v) * 10) / 10 + ' px'; }, () => { this.sizePreview(false); App.saveTools(); });
-    this.sliders.opacity = this.vslider('Непрозр.', v => { Tools.ts().opacity = Math.max(0.01, v); }, () => Tools.ts().opacity, v => Math.round(v * 100) + '%', () => App.saveTools());
+    this.sliders.size = this.vslider('Размер', v => { Tools.ts().size = v; this.sizePreview(true); }, () => Tools.ts().size, v => { const b = Tools.brush(); return Math.round(Brushes.sizePx(b, v) * 10) / 10 + ' px'; }, () => { this.sizePreview(false); App.saveTools(); Desk.renderOptions(); });
+    this.sliders.opacity = this.vslider('Непрозр.', v => { Tools.ts().opacity = Math.max(0.01, v); }, () => Tools.ts().opacity, v => Math.round(v * 100) + '%', () => { App.saveTools(); Desk.renderOptions(); });
     this.pickBtn = U.el('button', { class: 'sbtn', title: 'Пипетка', onclick: () => Tools.set('picker') }, U.icon('picker', 'sm'));
-    sl.append(this.sliders.size.el, this.pickBtn, this.sliders.opacity.el);
-    window.addEventListener('resize', () => this.position());
+    const setBtn = U.el('button', { class: 'sbtn', title: 'Настройки кисти', onclick: () => Panels.studio(Tools.brush().id) }, U.icon('settings', 'sm'));
+    sl.append(this.sliders.size.el, this.pickBtn, this.sliders.opacity.el, setBtn);
+    Desk.build();
+    window.addEventListener('resize', () => { this.applyLayout(true); this.position(); });
+    this.applyLayout();
+  },
+  /* выбор раскладки: настольная (меню и панели) или планшетная */
+  applyLayout(fromResize) {
+    const m = Settings.uiMode || 'auto';
+    const auto = window.innerWidth >= 1000 && window.innerHeight >= 600 && !matchMedia('(pointer:coarse)').matches;
+    const desk = m === 'desk' ? window.innerWidth >= 700 : m === 'touch' ? false : auto;
+    if (desk === this.desk && fromResize) return;
+    const changed = desk !== this.desk;
+    this.desk = desk; document.body.classList.toggle('desk', desk);
+    this.closePopovers(); Desk.closeMenus();
+    if (desk) { Desk.renderDock(); Desk.renderOptions(); Desk.sync(); Desk.status(); }
+    if (this.optKind) this.optbarRefresh();
+    if (changed && View.ctx) { View.theme(); View.fit(); }
   },
   action(act, btn) {
     switch (act) {
@@ -39,7 +55,7 @@ const UI = {
       case 'menu': this.pop('menu', btn, () => Panels.menu(), { title: 'Действия', width: 360 }); break;
       case 'adjust': this.pop('adjust', btn, () => Panels.adjustList(), { title: 'Коррекция', width: 300 }); break;
       case 'guides': this.pop('guides', btn, () => Panels.guides(), { title: 'Помощник рисования', width: 330, onOpen: () => { Guides.editing = true; View.requestDraw(); }, onClose: () => { Guides.editing = false; View.requestDraw(); App.changed(); } }); break;
-      case 'layers': this.pop('layers', btn, () => Panels.layers(), { title: 'Слои', width: 330, head: Panels.layersHead() }); break;
+      case 'layers': this.pop('layers', btn, () => Panels.layers(), { title: 'Слои', width: 340, head: Panels.layersHead() }); break;
       case 'color': this.pop('color', btn, () => ColorUI.build(), { title: 'Цвет', width: 324 }); break;
     }
   },
@@ -65,17 +81,19 @@ const UI = {
     const el = this.popEl; if (!el) return;
     const a = this.popDef.anchor, w = el.offsetWidth;
     if (window.innerWidth <= 560) { el.style.left = ''; el.style.top = ''; return; }
-    let left = 70, top = 56;
-    if (a) { const r = a.getBoundingClientRect(); left = r.left + r.width / 2 > window.innerWidth / 2 ? r.right - w : r.left; top = r.bottom + 6; }
-    el.style.left = U.clamp(left, 6, window.innerWidth - w - 6) + 'px'; el.style.top = top + 'px';
+    let left = this.desk ? 60 : 70, top = this.desk ? 106 : 56;
+    if (a && a.isConnected) { const r = a.getBoundingClientRect(); left = r.left + r.width / 2 > window.innerWidth / 2 ? r.right - w : r.left; top = r.bottom + 6; if (this.desk && r.left < 50) { left = r.right + 6; top = r.top; } }
+    el.style.left = U.clamp(left, 6, window.innerWidth - w - 6) + 'px'; el.style.top = Math.max(6, Math.min(top, window.innerHeight - el.offsetHeight - 6)) + 'px';
   },
   reopen(id) {
+    Desk.refreshPanel(id);
     if (this.openId !== id) return;
     const { build, body } = this.popDef, st = body.scrollTop;
     body.innerHTML = ''; body.append(build()); body.scrollTop = st;
   },
   closePopovers() {
-    if (!this.popEl) return false;
+    const menus = Desk.built ? Desk.closeMenus() : false;
+    if (!this.popEl) return menus;
     const def = this.popDef;
     this.popEl.remove(); if (def.anchor) def.anchor.classList.remove('on');
     this.popEl = null; this.openId = null; this.popDef = null;
@@ -84,8 +102,8 @@ const UI = {
   },
   toggleBrushLib(anchor) {
     anchor = anchor || U.$(`#rail [data-tool=${Tools.cur}]`);
-    this.pop('brushes', anchor, () => Panels.brushLib(), { title: { brush: 'Кисти', smudge: 'Кисть для пальца', eraser: 'Кисть ластика', clone: 'Кисть клонирования' }[Tools.cur] || 'Кисти', width: 380, head: Panels.brushHead() });
-    if (this.popEl) { const r = U.$('#rail').getBoundingClientRect(); if (window.innerWidth > 560) { this.popEl.style.left = (Settings.lefty ? r.left - 386 : r.right + 6) + 'px'; this.popEl.style.top = r.top + 'px'; } }
+    this.pop('brushes', anchor, () => Panels.brushLib(), { title: { brush: 'Кисти', smudge: 'Кисть для пальца', eraser: 'Кисть ластика', clone: 'Кисть штампа' }[Tools.cur] || 'Кисти', width: 380, head: Panels.brushHead() });
+    if (this.popEl && !this.desk) { const r = U.$('#rail').getBoundingClientRect(); if (window.innerWidth > 560) { this.popEl.style.left = (Settings.lefty ? r.left - 386 : r.right + 6) + 'px'; this.popEl.style.top = r.top + 'px'; } }
   },
   /* ---------- элементы ---------- */
   vslider(label, set, get, fmt, end) {
@@ -120,8 +138,7 @@ const UI = {
   seg(options, value, onChange) {
     const el = U.el('div', { class: 'seg' });
     for (const [v, label, icon] of options) {
-      const b = U.el('button', { class: v === value ? 'on' : '', title: label, onclick: () => { U.$$('button', el).forEach(x => x.classList.remove('on')); b.classList.add('on'); onChange(v); } }, icon ? U.icon(icon, 'sm') : null, icon && label.length > 14 ? null : (icon ? null : label));
-      if (icon) b.append(U.el('span', { text: label, style: { marginLeft: '4px' } }));
+      const b = U.el('button', { class: v === value ? 'on' : '', title: label, onclick: () => { U.$$('button', el).forEach(x => x.classList.remove('on')); b.classList.add('on'); onChange(v); } }, icon ? U.icon(icon, 'sm') : label);
       el.append(b);
     }
     return el;
@@ -155,75 +172,128 @@ const UI = {
     U.$$('#rail .tool').forEach(b => b.classList.toggle('on', b.dataset.tool === Tools.cur || (Tools.cur === 'clone' && b.dataset.tool === 'brush')));
     this.pickBtn && this.pickBtn.classList.toggle('on', Tools.cur === 'picker');
     this.sliders.size && this.sliders.size.show(); this.sliders.opacity && this.sliders.opacity.show();
-    if (this.openId === 'brushes') this.closePopovers();
+    if (this.openId === 'brushes' && !this.desk) this.closePopovers();
+    if (this.openId === 'brushes' && this.desk) this.reopen('brushes');
+    Desk.sync(); Desk.renderOptions(); Desk.refreshPanel('brushset'); Desk.refreshPanel('brushes');
+    const hints = { brush: 'Кисть: рисуйте; удержание — пипетка, задержка в конце — фигура', eraser: 'Ластик', smudge: 'Палец: растушёвка цвета', clone: 'Штамп: Alt+клик — источник', fill: 'Заливка: щелчок — залить, тяните вбок — порог', gradient: 'Градиент: протяните от начала к концу (Shift — 45°)', select: 'Выделение: Shift — добавить, Alt — вычесть', transform: 'Трансформация: тяните маркеры, Enter — применить, Esc — отмена', text: 'Текст: щелчок по холсту', shapes: 'Фигуры: протяните (Shift — пропорционально, Alt — от центра)', picker: 'Пипетка: щелчок — взять цвет', hand: 'Рука: перемещение холста', zoom: 'Масштаб: щелчок — увеличить, Alt — уменьшить, тяните — плавно' };
+    Desk.hint(hints[Tools.cur] || '');
   },
   colorChanged() {
     if (this.swatch) this.swatch.style.background = Colors.hex();
     if (this.openId === 'color' && this.popDef.body.firstChild && this.popDef.body.firstChild._refresh) this.popDef.body.firstChild._refresh();
+    const p = Desk.panelEl('color'); if (p && p._refresh) p._refresh();
+    Desk.sync();
   },
   layersChanged() {
     if (this._lc) return;
-    this._lc = requestAnimationFrame(() => { this._lc = 0; if (this.openId === 'layers' && !Panels.dragging) this.reopen('layers'); Anim.refreshBar(); });
+    this._lc = requestAnimationFrame(() => {
+      this._lc = 0;
+      if (this.openId === 'layers' && !Panels.dragging) this.reopen('layers');
+      else if (!Panels.dragging) Desk.refreshPanel('layers');
+      Anim.refreshBar(); Desk.status();
+    });
   },
   historyChanged() {
     if (!this.undoBtn) return;
     this.undoBtn.disabled = !History.pos; this.redoBtn.disabled = History.pos >= History.list.length;
+    Desk.refreshPanel('history');
   },
-  selChanged() { if (this.optKind === 'select') this.optbarRefresh(); },
+  selChanged() { if (this.optKind === 'select' || (this.desk && Tools.cur === 'select')) this.optbarRefresh(); },
   viewChanged() {
     if (!Engine.doc) return;
     const deg = Math.round(((View.r * 180 / Math.PI) % 360 + 360) % 360);
     if (Input.mode === 'gesture') this.hint(`${Math.round(View.s * 100)}%` + (deg ? ` · ${deg}°` : ''), 700);
+    Desk.status();
   },
-  setTitle(t) { if (this.title) this.title.textContent = t; document.title = t + ' — Мазок'; },
-  toggleHidden() { document.body.classList.toggle('ui-hidden'); this.closePopovers(); if (document.body.classList.contains('ui-hidden')) U.toast('Интерфейс скрыт — коснитесь 4 пальцами или нажмите Tab'); },
+  setTitle(t) { if (this.title) this.title.textContent = t; document.title = t + ' — Мазок'; Desk.status(); },
+  toggleHidden() { document.body.classList.toggle('ui-hidden'); this.closePopovers(); if (document.body.classList.contains('ui-hidden')) U.toast('Интерфейс скрыт — Tab или касание 4 пальцами, чтобы вернуть'); },
   position() { this.placePop(); },
   /* ---------- контекстная панель ---------- */
   showOptbar(kind) { this.optKind = kind; this.optbarRefresh(); },
-  hideOptbar() { this.optKind = null; const o = U.$('#optbar'); o.className = 'hidden'; o.innerHTML = ''; },
+  hideOptbar() { this.optKind = null; const o = U.$('#optbar'); o.className = 'hidden'; o.innerHTML = ''; Desk.renderOptions(); },
   optbarRefresh() {
-    const o = U.$('#optbar'), k = this.optKind; if (!k) return;
+    const o = U.$('#optbar'), k = this.optKind;
+    if (this.desk) {
+      Desk.renderOptions();
+      if (k === 'adjust') { o.innerHTML = ''; o.className = ''; this.adjustPanel(o); } else { o.className = 'hidden'; o.innerHTML = ''; }
+      return;
+    }
+    if (!k) return;
     o.innerHTML = ''; o.className = '';
+    if (k === 'adjust') this.adjustPanel(o); else this.optContent(k, o);
+  },
+  optContent(k, o) {
     const btn = (label, fn, cls, icon, title) => U.el('button', { class: 'ob' + (cls ? ' ' + cls : ''), title: title || label, onclick: fn }, icon ? U.icon(icon, 'sm') : null, label ? U.el('span', { text: label }) : null);
     const sep = () => U.el('div', { class: 'obsep' });
-    if (k === 'select') {
+    const wide = this.desk || window.innerWidth > 900;
+    if (k === 'paint') Desk.paintOptions(o);
+    else if (k === 'select') {
       const T = SelectTool;
-      for (const [id, n, ic] of [['rect', 'Прямоугольник', 'rect'], ['ellipse', 'Эллипс', 'ellipse'], ['lasso', 'Лассо', 'lasso'], ['wand', 'Авто', 'wand']])
-        o.append(btn(window.innerWidth > 900 ? n : '', () => { T.shape = id; T.poly = []; this.optbarRefresh(); }, T.shape === id ? 'on' : '', ic, n));
-      o.append(sep());
-      for (const [id, n] of [['replace', 'Новое'], ['add', '+ Добавить'], ['subtract', '− Вычесть']]) o.append(btn(n, () => { T.op = id; this.optbarRefresh(); }, T.op === id ? 'on' : ''));
+      if (!this.desk) for (const [id, n, ic] of [['rect', 'Прямоугольник', 'rect'], ['ellipse', 'Эллипс', 'ellipse'], ['lasso', 'Лассо', 'lasso'], ['wand', 'Авто', 'wand']])
+        o.append(btn(wide ? n : '', () => { T.shape = id; T.poly = []; this.optbarRefresh(); }, T.shape === id ? 'on' : '', ic, n));
+      if (!this.desk) o.append(sep());
+      for (const [id, n] of [['replace', 'Новое'], ['add', '+ Добавить'], ['subtract', '− Вычесть'], ['intersect', '∩ Пересечь']]) o.append(btn(n, () => { T.op = id; this.optbarRefresh(); }, T.op === id ? 'on' : ''));
+      if (T.shape === 'wand') o.append(sep(), this.desk ? Desk.mini('Допуск', 0, 100, T.tol, 1, v => v + '', v => { T.tol = v; }) : U.el('span', { class: 'ob', text: 'Порог ' + T.tol + '% — тяните вбок' }));
       o.append(sep(), btn('', () => Sel.invert(), '', 'invert', 'Инвертировать'), btn('', async () => { const v = await Panels.number('Растушёвка, px', 8, 0, 200); if (v) Sel.feather(v); }, '', 'feather', 'Растушевать'),
-        btn('', () => Ops.copyPaste(false), '', 'copy', 'Копировать и вставить'), btn('', () => Ops.fill(), '', 'fill', 'Залить выделение цветом'), btn('', () => Ops.clear(), '', 'trash', 'Очистить выделенное'),
+        btn('', () => Ops.copyPaste(false), '', 'copy', 'Скопировать на новый слой'), btn('', () => Ops.fill(), '', 'fill', 'Залить выделение цветом'), btn('', () => Ops.clear(), '', 'trash', 'Очистить выделенное'),
         btn('Снять', () => Sel.clear(), Sel.active ? '' : 'off'));
-      if (T.shape === 'wand') o.append(U.el('span', { class: 'ob', text: 'Порог ' + T.tol + '% — тяните вбок' }));
       if (T.shape === 'lasso') o.append(U.el('span', { class: 'ob', style: { opacity: 0.7 }, text: 'Обведите или ставьте точки' }));
     } else if (k === 'transform') {
       const X = Xform;
       for (const [id, n] of [['free', 'Свободно'], ['uniform', 'Пропорц.'], ['distort', 'Искажение'], ['warp', 'Деформация']]) o.append(btn(n, () => X.setMode(id), X.mode === id ? 'on' : ''));
       o.append(sep(), btn('', () => X.act('flipH'), '', 'flipH', 'Отразить по горизонтали'), btn('', () => X.act('flipV'), '', 'flipV', 'Отразить по вертикали'), btn('', () => X.act('rot45'), '', 'rotate', 'Повернуть на 45°'),
         btn('', () => X.act('fit'), '', 'fit', 'По размеру холста'), btn('Сглаж.', () => X.act('smooth'), X.smooth ? 'on' : '', null, 'Бикубическая интерполяция'), btn('Сброс', () => X.act('reset')),
-        sep(), btn('Готово', () => Tools.set(Tools.prev && Tools.prev !== 'transform' ? Tools.prev : 'brush'), 'primary'));
+        sep(), btn('Отмена', () => { X.cancelAll(); Tools.set(Tools.prev && Tools.prev !== 'transform' ? Tools.prev : 'brush'); }), btn('Готово', () => Tools.set(Tools.prev && Tools.prev !== 'transform' ? Tools.prev : 'brush'), 'primary'));
     } else if (k === 'fill') {
       o.append(U.el('span', { class: 'ob', text: 'Источник:' }));
       for (const [id, n] of [['layer', 'Слой'], ['all', 'Все слои'], ['reference', 'Референс']]) o.append(btn(n, () => { Settings.fillSource = id; Settings.save(); this.optbarRefresh(); }, Settings.fillSource === id ? 'on' : ''));
       o.append(sep());
-      const tol = this.hslider('Порог', 0, 100, Settings.fillTol, 1, v => { Settings.fillTol = v; }, v => v + '%', () => Settings.save()); tol.style.width = '170px';
-      const ex = this.hslider('Расширить', 0, 4, Settings.fillExpand, 1, v => { Settings.fillExpand = v; }, v => v + ' px', () => Settings.save()); ex.style.width = '130px';
-      o.append(tol, ex);
+      if (this.desk) o.append(Desk.mini('Допуск', 0, 100, Settings.fillTol, 1, v => v + '%', v => { Settings.fillTol = v; }, () => Settings.save()), Desk.mini('Расширить', 0, 4, Settings.fillExpand, 1, v => v + ' px', v => { Settings.fillExpand = v; }, () => Settings.save()));
+      else {
+        const tol = this.hslider('Порог', 0, 100, Settings.fillTol, 1, v => { Settings.fillTol = v; }, v => v + '%', () => Settings.save()); tol.style.width = '170px';
+        const ex = this.hslider('Расширить', 0, 4, Settings.fillExpand, 1, v => { Settings.fillExpand = v; }, v => v + ' px', () => Settings.save()); ex.style.width = '130px';
+        o.append(tol, ex);
+      }
     } else if (k === 'clone') {
       o.append(btn('Задать источник', () => { Clone.src = null; this.hint('Коснитесь холста, чтобы задать источник'); }, '', 'clone'),
         btn('Выровненный', () => { Settings.cloneAligned = !Settings.cloneAligned; Clone.off = null; Settings.save(); this.optbarRefresh(); }, Settings.cloneAligned ? 'on' : ''),
-        U.el('span', { class: 'ob', style: { opacity: 0.7 }, text: Clone.src ? 'Рисуйте кистью — копируется из источника' : 'Коснитесь холста или Alt+клик, чтобы выбрать источник' }),
-        btn('Готово', () => Tools.set('brush'), 'primary'));
+        U.el('span', { class: 'ob', style: { opacity: 0.7 }, text: Clone.src ? 'Рисуйте — копируется из источника' : 'Коснитесь холста или Alt+клик — источник' }));
+      if (!this.desk) o.append(btn('Готово', () => Tools.set('brush'), 'primary'));
     } else if (k === 'liquify') {
       const Lq = Liquify;
-      const sel = U.el('select', { class: 'input', style: { width: '140px', height: '34px' }, onchange: () => { Lq.mode = sel.value; } });
+      const sel = U.el('select', { class: 'input op-sel', style: { width: '140px', height: '30px' }, onchange: () => { Lq.mode = sel.value; } });
       for (const [id, n] of Lq.modes) sel.append(U.el('option', { value: id, text: n, selected: id === Lq.mode }));
-      const s1 = this.hslider('Размер', 1, 100, Math.round(Lq.size * 100), 1, v => { Lq.size = v / 100; View.requestDraw(); }, v => v + '%'); s1.style.width = '140px';
-      const s2 = this.hslider('Сила', 1, 100, Math.round(Lq.strength * 100), 1, v => { Lq.strength = v / 100; }, v => v + '%'); s2.style.width = '130px';
-      const s3 = this.hslider('Искажение', 0, 100, Math.round(Lq.distortion * 100), 1, v => { Lq.distortion = v / 100; }, v => v + '%'); s3.style.width = '130px';
+      const pc = v => v + '%';
+      const s1 = this.desk ? Desk.mini('Размер', 1, 100, Math.round(Lq.size * 100), 1, pc, v => { Lq.size = v / 100; View.requestDraw(); }) : this.hslider('Размер', 1, 100, Math.round(Lq.size * 100), 1, v => { Lq.size = v / 100; View.requestDraw(); }, pc);
+      const s2 = this.desk ? Desk.mini('Сила', 1, 100, Math.round(Lq.strength * 100), 1, pc, v => { Lq.strength = v / 100; }) : this.hslider('Сила', 1, 100, Math.round(Lq.strength * 100), 1, v => { Lq.strength = v / 100; }, pc);
+      const s3 = this.desk ? Desk.mini('Искажение', 0, 100, Math.round(Lq.distortion * 100), 1, pc, v => { Lq.distortion = v / 100; }) : this.hslider('Искажение', 0, 100, Math.round(Lq.distortion * 100), 1, v => { Lq.distortion = v / 100; }, pc);
+      if (!this.desk) { s1.style.width = '140px'; s2.style.width = '130px'; s3.style.width = '130px'; }
       o.append(U.el('b', { class: 'ob', text: 'Пластика' }), sel, s1, s2, s3, btn('Сброс', () => Lq.reset()), btn('Отмена', () => Lq.discard()), btn('Применить', () => Lq.apply(), 'primary'));
-    } else if (k === 'adjust') this.adjustPanel(o);
+    } else if (k === 'gradient') {
+      const G = GradientTool;
+      for (const [id, n] of G.types) o.append(btn(n, () => { G.type = id; this.optbarRefresh(); }, G.type === id ? 'on' : ''));
+      const sel = U.el('select', { class: 'input op-sel', style: { width: '190px', height: '30px' }, onchange: () => { G.colors = sel.value; } });
+      for (const [id, n] of G.presets()) sel.append(U.el('option', { value: id, text: n, selected: id === G.colors }));
+      o.append(sep(), sel, btn('Инверсия', () => { G.reverse = !G.reverse; this.optbarRefresh(); }, G.reverse ? 'on' : ''));
+      if (this.desk) o.append(Desk.mini('Непрозр.', 0, 100, Math.round(G.opacity * 100), 1, v => v + '%', v => { G.opacity = v / 100; }));
+    } else if (k === 'shapes') {
+      const S = ShapeTool;
+      for (const [id, n] of S.kinds) o.append(btn(n, () => { S.kind = id; this.optbarRefresh(); }, S.kind === id ? 'on' : ''));
+      o.append(sep());
+      if (S.kind !== 'line') o.append(btn('Заливка', () => { S.fill = !S.fill; this.optbarRefresh(); }, S.fill ? 'on' : ''), btn('Обводка', () => { S.stroke = !S.stroke; this.optbarRefresh(); }, S.stroke || !S.fill ? 'on' : ''));
+      const px = v => v + ' px';
+      o.append(this.desk ? Desk.mini('Толщина', 1, 200, S.width, 1, px, v => { S.width = v; }) : this.hslider('Толщина', 1, 200, S.width, 1, v => { S.width = v; }, px));
+      if (S.kind === 'rect') o.append(this.desk ? Desk.mini('Скругление', 0, 300, S.radius, 1, px, v => { S.radius = v; }) : this.hslider('Скругление', 0, 300, S.radius, 1, v => { S.radius = v; }, px));
+      if (S.kind === 'polygon' || S.kind === 'star') o.append(this.desk ? Desk.mini('Углов', 3, 16, S.sides, 1, v => v + '', v => { S.sides = v; }) : this.hslider('Углов', 3, 16, S.sides, 1, v => { S.sides = v; }));
+      o.append(U.el('span', { class: 'ob', style: { opacity: 0.7 }, text: S.fill && S.stroke ? 'Заливка — основной цвет, обводка — фоновый' : 'Цвет — основной' }));
+    } else if (k === 'picker') {
+      o.append(U.el('span', { class: 'ob', text: 'Образец:' }));
+      for (const [id, n] of [['all', 'Все слои'], ['layer', 'Текущий слой']]) o.append(btn(n, () => { Settings.pickSource = id; Settings.save(); this.optbarRefresh(); }, Settings.pickSource === id ? 'on' : ''));
+    } else if (k === 'text') {
+      o.append(U.el('span', { class: 'ob', style: { opacity: 0.8 }, text: 'Щёлкните по холсту, чтобы добавить текст; по существующему тексту — чтобы изменить' }));
+    } else if (k === 'nav') {
+      o.append(btn('Вписать', () => View.fit(), '', 'fit'), btn('100%', () => View.actual()), btn('Сбросить поворот', () => View.rotateAt(View.W / 2, View.H / 2, -View.r), '', 'rotate'), btn('Зеркальный вид', () => View.toggleFlip(), View.flip < 0 ? 'on' : '', 'flipH'));
+    }
   },
   showAdjustPanel(f) { this.adjF = f; this.showOptbar('adjust'); },
   adjustPanel(o) {

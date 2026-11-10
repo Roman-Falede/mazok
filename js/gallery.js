@@ -20,7 +20,8 @@ const DocIO = {
   flat(doc) {
     const c = U.canvas(doc.w, doc.h), x = c.getContext('2d');
     if (doc.bgVisible) { x.fillStyle = doc.bg; x.fillRect(0, 0, doc.w, doc.h); }
-    for (const L of doc.layers) if (L.visible) { x.globalAlpha = L.opacity; x.globalCompositeOperation = L.blend; x.drawImage(L.canvas, 0, 0); }
+    const r = { x: 0, y: 0, w: doc.w, h: doc.h };
+    for (const L of doc.layers) if (L.visible) Engine.blendDraw(x, L.canvas, r, L.blend, L.opacity);
     return c;
   },
   save(doc) {

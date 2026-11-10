@@ -2,12 +2,55 @@
 /* Мазок — документ, слои, композитинг, история, выделение, операции со слоями */
 
 const BLENDS = [
-  ['source-over', 'Обычный', 'N'], ['multiply', 'Умножение', 'M'], ['screen', 'Экран', 'S'], ['overlay', 'Перекрытие', 'O'],
-  ['darken', 'Затемнение', 'D'], ['lighten', 'Осветление', 'L'], ['color-dodge', 'Осветление основы', 'CD'], ['color-burn', 'Затемнение основы', 'CB'],
-  ['lighter', 'Добавление', 'A'], ['hard-light', 'Жёсткий свет', 'HL'], ['soft-light', 'Мягкий свет', 'SL'], ['difference', 'Разница', 'Df'],
-  ['exclusion', 'Исключение', 'E'], ['hue', 'Цветовой тон', 'H'], ['saturation', 'Насыщенность', 'Sa'], ['color', 'Цвет', 'C'], ['luminosity', 'Яркость', 'Lu']
+  ['source-over', 'Обычный', 'N'], ['dissolve', 'Растворение', 'Ds'],
+  ['darken', 'Замена тёмным', 'D'], ['multiply', 'Умножение', 'M'], ['color-burn', 'Затемнение основы', 'CB'], ['linear-burn', 'Линейный затемнитель', 'LB'], ['darker-color', 'Темнее', 'DC'],
+  ['lighten', 'Замена светлым', 'L'], ['screen', 'Экран', 'S'], ['color-dodge', 'Осветление основы', 'CD'], ['lighter', 'Линейный осветлитель (добавить)', 'A'], ['lighter-color', 'Светлее', 'LC'],
+  ['overlay', 'Перекрытие', 'O'], ['soft-light', 'Мягкий свет', 'SL'], ['hard-light', 'Жёсткий свет', 'HL'], ['vivid-light', 'Яркий свет', 'VL'], ['linear-light', 'Линейный свет', 'LL'], ['pin-light', 'Точечный свет', 'PL'], ['hard-mix', 'Жёсткое смешение', 'HM'],
+  ['difference', 'Разница', 'Df'], ['exclusion', 'Исключение', 'E'], ['subtract', 'Вычитание', 'Sb'], ['divide', 'Разделить', 'Dv'],
+  ['hue', 'Цветовой тон', 'H'], ['saturation', 'Насыщенность', 'Sa'], ['color', 'Цветность', 'C'], ['luminosity', 'Яркость', 'Lu']
 ];
+const BLEND_GROUPS = [[0, 2], [2, 7], [7, 12], [12, 19], [19, 23], [23, 27]];
 const blendInfo = id => BLENDS.find(b => b[0] === id) || BLENDS[0];
+/* режимы, которых нет в Canvas 2D, — считаются попиксельно */
+const CustomBlend = {
+  ids: new Set(['dissolve', 'linear-burn', 'darker-color', 'lighter-color', 'vivid-light', 'linear-light', 'pin-light', 'hard-mix', 'subtract', 'divide']),
+  burn: (b, s) => s <= 0 ? (b >= 1 ? 1 : 0) : 1 - Math.min(1, (1 - b) / s),
+  dodge: (b, s) => s >= 1 ? (b <= 0 ? 0 : 1) : Math.min(1, b / (1 - s)),
+  fn: {
+    'linear-burn': (b, s) => Math.max(0, b + s - 1),
+    'vivid-light': (b, s) => s <= 0.5 ? CustomBlend.burn(b, 2 * s) : CustomBlend.dodge(b, 2 * s - 1),
+    'linear-light': (b, s) => Math.min(1, Math.max(0, b + 2 * s - 1)),
+    'pin-light': (b, s) => s <= 0.5 ? Math.min(b, 2 * s) : Math.max(b, 2 * s - 1),
+    'hard-mix': (b, s) => b + s >= 1 ? 1 : 0,
+    'subtract': (b, s) => Math.max(0, b - s),
+    'divide': (b, s) => s <= 0 ? 1 : Math.min(1, b / s)
+  },
+  hash(x, y) { let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; },
+  apply(d, s, mode, alpha, r) {
+    const f = this.fn[mode], w = r.w, colorMode = mode === 'darker-color' || mode === 'lighter-color';
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+      const sa = s[i + 3] / 255 * alpha;
+      if (sa <= 0) continue;
+      if (mode === 'dissolve') {
+        if (this.hash(r.x + p % w, r.y + (p / w | 0)) < sa) { d[i] = s[i]; d[i + 1] = s[i + 1]; d[i + 2] = s[i + 2]; d[i + 3] = 255; }
+        continue;
+      }
+      const ba = d[i + 3] / 255;
+      const sr = s[i] / 255, sg = s[i + 1] / 255, sb = s[i + 2] / 255, br = d[i] / 255, bg = d[i + 1] / 255, bb = d[i + 2] / 255;
+      let Br, Bg, Bb;
+      if (colorMode) {
+        const ls = 0.3 * sr + 0.59 * sg + 0.11 * sb, lb = 0.3 * br + 0.59 * bg + 0.11 * bb;
+        const useS = mode === 'darker-color' ? ls < lb : ls > lb;
+        if (useS) { Br = sr; Bg = sg; Bb = sb; } else { Br = br; Bg = bg; Bb = bb; }
+      } else { Br = f(br, sr); Bg = f(bg, sg); Bb = f(bb, sb); }
+      const ao = sa + ba * (1 - sa), k1 = sa * (1 - ba), k2 = sa * ba, k3 = (1 - sa) * ba;
+      d[i] = (k1 * sr + k2 * Br + k3 * br) / ao * 255;
+      d[i + 1] = (k1 * sg + k2 * Bg + k3 * bg) / ao * 255;
+      d[i + 2] = (k1 * sb + k2 * Bb + k3 * bb) / ao * 255;
+      d[i + 3] = ao * 255;
+    }
+  }
+};
 
 class Layer {
   constructor(w, h, name) {
@@ -100,16 +143,27 @@ const Engine = {
             t.globalAlpha = C.opacity; t.globalCompositeOperation = 'source-over'; t.drawImage(this.src(C), r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
             t.globalAlpha = 1; t.globalCompositeOperation = 'destination-in'; t.drawImage(src, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
             t.restore();
-            g.globalCompositeOperation = C.blend; g.drawImage(this._s.clipt.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+            this.blendDraw(g, this._s.clipt.canvas, r, C.blend, 1);
           }
           g.restore(); src = this._s.group.canvas;
         }
-        c.globalAlpha = L.opacity; c.globalCompositeOperation = L.blend;
-        c.drawImage(src, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+        this.blendDraw(c, src, r, L.blend, L.opacity);
       }
       i = j;
     }
     c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+  },
+  /* наложение одного холста на другой в прямоугольнике r с любым режимом */
+  blendDraw(c, src, r, mode, alpha) {
+    if (!CustomBlend.ids.has(mode)) {
+      c.globalAlpha = alpha; c.globalCompositeOperation = mode;
+      c.drawImage(src, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+      return;
+    }
+    const dst = c.getImageData(r.x, r.y, r.w, r.h);
+    CustomBlend.apply(dst.data, U.readPixels(src, r).data, mode, alpha, r);
+    c.putImageData(dst, r.x, r.y);
   },
   composeAnim(c, r) {
     const d = this.doc, L = d.layers, n = L.length;
@@ -240,6 +294,14 @@ const History = {
     if (App.blockHistory()) return;
     if (this.pos >= this.list.length) { U.toast('Нечего повторять'); return; }
     const e = this.list[this.pos++]; e.redo(); this.after(); U.toast('Повторено: ' + e.name, 1100);
+  },
+  goto(i) {
+    if (App.blockHistory()) return;
+    i = U.clamp(i, 0, this.list.length);
+    if (i === this.pos) return;
+    while (this.pos > i) this.list[--this.pos].undo();
+    while (this.pos < i) this.list[this.pos++].redo();
+    this.after();
   },
   after() { for (const L of Engine.doc.layers) L.touch(); Engine.renderAll(); Sel.refresh(); UI.layersChanged(); UI.historyChanged(); App.changed(); },
   pixels(L, r, before, after, name) {
@@ -414,7 +476,7 @@ const Ops = {
         if (!Up.visible) return;
         let src = Up.canvas;
         if (Up.clip) { const t = U.clone(Up.canvas), x = t.getContext('2d'); x.globalCompositeOperation = 'destination-in'; x.drawImage(B.canvas, 0, 0); src = t; }
-        B.ctx.save(); B.ctx.globalAlpha = Up.opacity; B.ctx.globalCompositeOperation = Up.blend; B.ctx.drawImage(src, 0, 0); B.ctx.restore();
+        Engine.blendDraw(B.ctx, src, Engine.full(), Up.blend, Up.opacity);
       });
       if (B.text) this.setProps(B, { text: null });
       this.remove(i);

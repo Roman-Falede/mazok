@@ -28,13 +28,13 @@ const App = {
     catch (e) { console.error(e); U.toast('Не удалось открыть: ' + e.message, 3000); }
   },
   openDoc(doc) {
-    Tools.cur = Tools.isPaint() || ['fill', 'select', 'text'].includes(Tools.cur) ? Tools.cur : 'brush';
+    Tools.cur = Tools.isPaint() || ['fill', 'select', 'text', 'gradient', 'shapes', 'hand', 'zoom'].includes(Tools.cur) ? Tools.cur : 'brush';
     if (Tools.cur === 'clone') Tools.cur = 'brush';
     Clone.src = null; Clone.off = null;
     Engine.setDoc(doc); this.dirty = false;
     Gallery.hide(); UI.setTitle(doc.name);
     document.body.classList.toggle('anim', doc.anim.on);
-    View.fit(); Anim.refreshBar(); UI.toolChanged(); UI.historyChanged(); UI.layersChanged();
+    View.fit(); Anim.refreshBar(); if (UI.desk) Desk.renderDock(); UI.toolChanged(); UI.historyChanged(); UI.layersChanged();
     const t = Tools.map[Tools.cur]; if (t && t.activate) t.activate();
     if (!history.state || !history.state.c) history.pushState({ c: 1 }, '');
   },
@@ -53,12 +53,20 @@ const App = {
     if (Settings.timelapse) Timelapse.capture();
   },
   autosave: U.debounce(() => App.saveNow(), 1800),
-  async saveNow() {
-    const d = Engine.doc; if (!d || !this.dirty || Tools.busy()) return;
+  async saveNow(force) {
+    const d = Engine.doc; if (!d || (!this.dirty && !force) || Tools.busy()) return;
     this.dirty = false; await DocIO.save(d);
   },
+  async newCanvas() { if (Engine.doc) { Tools.commitPending(); await this.saveNow(true); } Gallery.newDialog(); },
+  async openFile() {
+    const files = await U.pickFile('image/*,.psd,.mazok,.zip', true); if (!files.length) return;
+    if (Engine.doc) { Tools.commitPending(); await this.saveNow(true); }
+    let last = null;
+    for (const f of files) { try { U.toast('Открываю: ' + f.name); last = await DocIO.importFile(f); } catch (e) { U.toast(f.name + ': ' + e.message, 3000); } }
+    if (last) this.openDoc(last);
+  },
   blockHistory() {
-    if (Paint.st || Fill.st || Xform.drag) return true;
+    if (Paint.st || Fill.st || Xform.drag || GradientTool.st || ShapeTool.st) return true;
     if (Xform.s) { Xform.cancelAll(); Tools.set(Tools.prev && Tools.prev !== 'transform' ? Tools.prev : 'brush'); U.toast('Трансформация отменена'); return true; }
     if (Liquify.s) { Liquify.discard(); U.toast('Пластика отменена'); return true; }
     if (Adjust.s && !Adjust.brushMode) { Adjust.cancel(); U.toast('Коррекция отменена'); return true; }
@@ -111,33 +119,45 @@ const App = {
     document.addEventListener('keydown', e => {
       if (e.target.closest && e.target.closest('input,textarea,select')) return;
       if (U.$('.modal-back')) return;
-      const d = Engine.doc; if (!d) return;
       const k = e.key.toLowerCase(), c = e.ctrlKey || e.metaKey;
+      if (c && (e.code === 'KeyN' && !e.shiftKey)) { e.preventDefault(); this.newCanvas(); return; }
+      if (c && e.code === 'KeyO') { e.preventDefault(); this.openFile(); return; }
+      if (e.key === 'F1') { e.preventDefault(); U.dialog({ title: 'Справка', body: Panels.helpBody(), cls: 'wide' }); return; }
+      const d = Engine.doc; if (!d) return;
       if (e.code === 'Space') { Input.space = true; if (!Input.mode) View.cv.style.cursor = 'grab'; e.preventDefault(); return; }
       if (c) {
+        const code = e.code.replace(/^Key|^Digit/, '').toLowerCase();
         const map = {
           z: () => e.shiftKey ? History.redo() : History.undo(), y: () => History.redo(),
-          s: () => { this.dirty = true; this.saveNow().then(() => U.toast('Сохранено')); },
-          c: () => Ops.copy(e.shiftKey), x: () => Ops.cut(), v: () => { if (!Ops.clipboard) return 'pass'; Ops.paste(); },
-          a: () => Sel.all(), d: () => Sel.clear(), i: () => e.shiftKey ? Sel.invert() : 'pass',
-          n: () => e.shiftKey ? Ops.add() : 'pass', j: () => Ops.duplicate(), e: () => Ops.mergeDown(),
-          0: () => View.fit(), '=': () => View.zoomAt(View.W / 2, View.H / 2, 1.25), '-': () => View.zoomAt(View.W / 2, View.H / 2, 0.8)
+          s: () => { this.saveNow(true).then(() => U.toast('Сохранено')); },
+          c: () => Ops.copy(e.shiftKey), x: () => e.shiftKey ? Liquify.begin() : Ops.cut(), v: () => { if (!Ops.clipboard) return 'pass'; Ops.paste(); },
+          a: () => Sel.all(), d: () => Sel.clear(), i: () => e.shiftKey ? Sel.invert() : (e.altKey ? Panels.resizeDialog() : 'pass'),
+          n: () => e.shiftKey ? Ops.add() : 'pass', j: () => Sel.active ? Ops.copyPaste(!!e.shiftKey) : Ops.duplicate(), e: () => e.shiftKey ? Ops.flatten() : Ops.mergeDown(),
+          t: () => Tools.set('transform'), w: () => this.toGallery(), k: () => Panels.prefsDialog(),
+          g: () => e.altKey ? Ops.toggle(d.layer, 'clip', 'Обтравочная маска') : 'pass',
+          0: () => View.fit(), 1: () => View.actual(), equal: () => View.zoomAt(View.W / 2, View.H / 2, 1.25), minus: () => View.zoomAt(View.W / 2, View.H / 2, 0.8)
         };
-        const fn = map[k];
+        const fn = map[code] || map[k];
         if (fn) { const r = fn(); if (r !== 'pass') e.preventDefault(); }
         return;
       }
-      if (e.altKey) { if (Tools.isPaint()) e.preventDefault(); return; }
+      if (e.altKey) { if (e.key === 'Backspace') { e.preventDefault(); Ops.fill(); return; } if (Tools.isPaint()) e.preventDefault(); return; }
       if (e.shiftKey && /^Digit\d$/.test(e.code)) { const n = +e.code.slice(5); Tools.ts().opacity = n === 0 ? 1 : n / 10; UI.toolChanged(); this.saveTools(); UI.hint('Непрозрачность ' + Math.round(Tools.ts().opacity * 100) + '%'); return; }
-      const tools = { b: 'brush', s: 'smudge', e: 'eraser', g: 'fill', i: 'picker', l: 'select', v: 'transform', t: 'text', m: 'select' };
-      if (tools[k] && !e.repeat) { Tools.set(tools[k]); return; }
+      const code = e.code.replace(/^Key/, '').toLowerCase();
+      const tools = { b: 'brush', r: 'smudge', e: 'eraser', s: 'clone', g: e.shiftKey ? 'gradient' : 'fill', i: 'picker', v: 'transform', t: 'text', u: 'shapes', h: 'hand', z: 'zoom' };
+      const sel = { m: SelectTool.shape === 'rect' && Tools.cur === 'select' ? 'ellipse' : 'rect', l: 'lasso', w: 'wand' };
+      if (!e.repeat && sel[code]) { Desk.pickTool('select:' + sel[code]); if (!UI.desk) UI.optbarRefresh(); return; }
+      if (!e.repeat && tools[code]) { Tools.set(tools[code]); return; }
+      if (code === 'x' && !e.repeat) { Colors.swap(); return; }
+      if (code === 'd' && !e.repeat) { Desk.defaultColors(); return; }
+      if (code === 'f' && !e.repeat) { View.toggleFlip(); return; }
+      if (e.key === '/') { Ops.toggle(d.layer, 'alphaLock', 'Защита прозрачности'); return; }
       switch (e.key) {
         case '[': case ']': {
           const ts = Tools.ts(); ts.size = U.clamp(ts.size + (e.key === ']' ? 0.03 : -0.03), 0, 1); UI.toolChanged(); UI.hint('Размер ' + (Math.round(Tools.cursorSize() * 10) / 10) + ' px'); this.saveTools(); break;
         }
         case '0': View.fit(); break;
         case '1': View.actual(); break;
-        case 'h': case 'H': View.toggleFlip(); break;
         case 'Tab': e.preventDefault(); UI.toggleHidden(); break;
         case 'Delete': case 'Backspace': if (Xform.s) break; Ops.clear(); break;
         case 'Enter':

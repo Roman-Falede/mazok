@@ -68,7 +68,11 @@ const Zip = {
 };
 
 const PSD = {
-  keys: { 'source-over': 'norm', multiply: 'mul ', screen: 'scrn', overlay: 'over', darken: 'dark', lighten: 'lite', 'color-dodge': 'div ', 'color-burn': 'idiv', lighter: 'lddg', 'hard-light': 'hLit', 'soft-light': 'sLit', difference: 'diff', exclusion: 'smud', hue: 'hue ', saturation: 'sat ', color: 'colr', luminosity: 'lum ' },
+  keys: {
+    'source-over': 'norm', dissolve: 'diss', multiply: 'mul ', screen: 'scrn', overlay: 'over', darken: 'dark', lighten: 'lite', 'color-dodge': 'div ', 'color-burn': 'idiv',
+    'linear-burn': 'lbrn', 'darker-color': 'dkCl', lighter: 'lddg', 'lighter-color': 'lgCl', 'hard-light': 'hLit', 'soft-light': 'sLit', 'vivid-light': 'vLit', 'linear-light': 'lLit',
+    'pin-light': 'pLit', 'hard-mix': 'hMix', difference: 'diff', exclusion: 'smud', subtract: 'fsub', divide: 'fdiv', hue: 'hue ', saturation: 'sat ', color: 'colr', luminosity: 'lum '
+  },
   write(doc) {
     const w = doc.w, h = doc.h, W = new BinWriter();
     W.str('8BPS'); W.u16(1); W.zeros(6); W.u16(3); W.u32(h); W.u32(w); W.u16(8); W.u16(3);

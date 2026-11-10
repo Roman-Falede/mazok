@@ -27,7 +27,7 @@ const Tools = {
   cancel() { this.t.cancel && this.t.cancel(); },
   overlay(ctx) { this.t.overlay && this.t.overlay(ctx); },
   isPaint() { return ['brush', 'smudge', 'eraser', 'clone'].includes(this.cur); },
-  busy() { return !!(Paint.st || Xform.s || Liquify.s || Fill.st); },
+  busy() { return !!(Paint.st || Xform.s || Liquify.s || Fill.st || GradientTool.st || ShapeTool.st); },
   commitPending() { if (Xform.s) Xform.commit(); if (Liquify.s) Liquify.apply(); if (Adjust.s) Adjust.apply(); },
   cursorSize() { const ts = this.ts(); return Brushes.sizePx(Brushes.get(ts.brushId), ts.size); },
   brush() { return Brushes.get(this.ts().brushId); }
@@ -52,7 +52,8 @@ const Paint = {
     const st = this.st = {
       mode, L, brush, size, opacity: ts.opacity, total: null, raf: 0, startP: p, started: false, shape: null,
       grain: brush.grain || brush.grainImage ? Grains.pattern(Engine.scratch('tmp').ctx, Brushes.grainId(brush), brush.grainScale, brush.grainStrength) : null,
-      applyMode: mode === 'eraser' ? 'erase' : (Adjust.s && Adjust.brushMode ? 'reveal' : 'paint')
+      applyMode: mode === 'eraser' ? 'erase' : (Adjust.s && Adjust.brushMode ? 'reveal' : 'paint'),
+      blend: ts.mode && ts.mode !== 'source-over' ? ts.mode : brush.blend
     };
     let onStamp = null;
     if (mode === 'smudge') onStamp = Smudge.stamper(st);
@@ -89,7 +90,7 @@ const Paint = {
     const d = Engine.doc, r = U.clipRect(U.inflate(r0, 1), d.w, d.h);
     if (!r) return;
     st.total = U.union(st.total, r);
-    if (st.mode !== 'smudge') Engine.applyBuffer(r, { mode: st.applyMode, opacity: st.opacity, grain: st.grain, blend: st.brush.blend });
+    if (st.mode !== 'smudge') Engine.applyBuffer(r, { mode: st.applyMode, opacity: st.opacity, grain: st.grain, blend: st.blend });
     Engine.renderRect(r);
   },
   rerender() {
@@ -772,7 +773,133 @@ const Liquify = {
   }
 };
 
+/* ---------- градиент ---------- */
+const GradientTool = {
+  type: 'linear', colors: 'fgbg', reverse: false, opacity: 1, st: null,
+  types: [['linear', 'Линейный'], ['radial', 'Радиальный'], ['reflected', 'Зеркальный'], ['angle', 'Угловой']],
+  presets() { return [['fgbg', 'Основной → фоновый'], ['fgtr', 'Основной → прозрачный'], ['rainbow', 'Радуга']].concat(GRADIENT_MAPS.filter(g => g.stops).map((g, i) => ['gm' + i, g.name])); },
+  activate() { UI.showOptbar('gradient'); }, deactivate() { UI.hideOptbar(); },
+  stops() {
+    const fg = Colors.rgb(), bg = Colors.prevRgb();
+    let s;
+    if (this.colors === 'fgbg') s = [[0, U.rgbStr(fg)], [1, U.rgbStr(bg)]];
+    else if (this.colors === 'fgtr') s = [[0, U.rgbStr(fg)], [1, U.rgbStr(fg, 0)]];
+    else if (this.colors === 'rainbow') s = [0, 60, 120, 180, 240, 300, 360].map((h, i) => [i / 6, U.rgbStr(U.hsv2rgb(h, 1, 1))]);
+    else s = GRADIENT_MAPS.filter(g => g.stops)[+this.colors.slice(2)].stops.map(([t, c]) => [t, c]);
+    if (this.reverse) s = s.map(([t, c]) => [1 - t, c]).reverse();
+    return s;
+  },
+  down(p) {
+    const L = Engine.doc.layer; if (!Ops.editable(L)) return;
+    if (!L.visible) { U.toast('Слой скрыт'); return; }
+    if (L.text) Ops.rasterize(L);
+    Engine.beginOverride(L); this.st = { L, x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false, sx: p.sx, sy: p.sy };
+  },
+  move(p) {
+    const st = this.st; if (!st) return;
+    let x = p.x, y = p.y;
+    if (p.shift) { const a = Math.round(Math.atan2(y - st.y0, x - st.x0) / (Math.PI / 4)) * Math.PI / 4, d = Math.hypot(x - st.x0, y - st.y0); x = st.x0 + Math.cos(a) * d; y = st.y0 + Math.sin(a) * d; }
+    st.x1 = x; st.y1 = y; if (Math.hypot(p.sx - st.sx, p.sy - st.sy) > 4) st.moved = true;
+    if (!this.pend) { this.pend = true; requestAnimationFrame(() => { this.pend = false; if (this.st) this.render(); }); }
+  },
+  render() {
+    const st = this.st, d = Engine.doc, A = Engine._s.active.ctx, t = Engine.scratch('tmp').ctx;
+    const { x0, y0, x1, y1 } = st, dx = x1 - x0, dy = y1 - y0, len = Math.max(1, Math.hypot(dx, dy));
+    let g; const stops = this.stops();
+    if (this.type === 'radial') g = t.createRadialGradient(x0, y0, 0, x0, y0, len);
+    else if (this.type === 'angle' && t.createConicGradient) g = t.createConicGradient(Math.atan2(dy, dx), x0, y0);
+    else if (this.type === 'reflected') g = t.createLinearGradient(x0 - dx, y0 - dy, x1, y1);
+    else g = t.createLinearGradient(x0, y0, x1, y1);
+    if (this.type === 'reflected') for (const [s, c] of stops) { g.addColorStop(0.5 - s / 2, c); g.addColorStop(0.5 + s / 2, c); }
+    else for (const [s, c] of stops) g.addColorStop(s, c);
+    t.save(); t.setTransform(1, 0, 0, 1, 0, 0); t.globalAlpha = 1; t.globalCompositeOperation = 'copy'; t.fillStyle = g; t.fillRect(0, 0, d.w, d.h);
+    if (Sel.active) { t.globalCompositeOperation = 'destination-in'; t.drawImage(Sel.mask, 0, 0); }
+    t.restore();
+    A.save(); A.globalCompositeOperation = 'copy'; A.drawImage(st.L.canvas, 0, 0);
+    A.globalAlpha = this.opacity; A.globalCompositeOperation = st.L.alphaLock ? 'source-atop' : 'source-over'; A.drawImage(Engine._s.tmp.canvas, 0, 0); A.restore();
+    Engine.renderAll();
+  },
+  up() { const st = this.st; if (!st) return; this.st = null; if (st.moved) { this.st = st; this.render(); this.st = null; Engine.commit(Engine.full(), 'Градиент'); } else { Engine.endOverride(); Engine.renderAll(); } },
+  cancel() { if (this.st) { this.st = null; Engine.endOverride(); Engine.renderAll(); } },
+  overlay(ctx) {
+    const st = this.st; if (!st) return;
+    const [a, b] = View.toScreen(st.x0, st.y0), [c, d] = View.toScreen(st.x1, st.y1);
+    ctx.lineWidth = 3; ctx.strokeStyle = '#0008'; ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    for (const [x, y] of [[a, b], [c, d]]) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fill(); ctx.stroke(); }
+  }
+};
+
+/* ---------- фигуры ---------- */
+const ShapeTool = {
+  kind: 'rect', fill: true, stroke: false, width: 8, radius: 0, sides: 6, st: null,
+  kinds: [['rect', 'Прямоугольник'], ['ellipse', 'Эллипс'], ['line', 'Линия'], ['polygon', 'Многоугольник'], ['star', 'Звезда']],
+  activate() { UI.showOptbar('shapes'); }, deactivate() { UI.hideOptbar(); },
+  down(p) {
+    const L = Engine.doc.layer; if (!Ops.editable(L)) return;
+    if (!L.visible) { U.toast('Слой скрыт'); return; }
+    if (L.text) Ops.rasterize(L);
+    Engine.beginOverride(L); this.st = { L, x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false, sx: p.sx, sy: p.sy };
+  },
+  move(p) {
+    const st = this.st; if (!st) return;
+    let x = p.x, y = p.y;
+    if (p.shift) {
+      if (this.kind === 'line') { const a = Math.round(Math.atan2(y - st.y0, x - st.x0) / (Math.PI / 4)) * Math.PI / 4, dd = Math.hypot(x - st.x0, y - st.y0); x = st.x0 + Math.cos(a) * dd; y = st.y0 + Math.sin(a) * dd; }
+      else { const w = x - st.x0, h = y - st.y0, m = Math.max(Math.abs(w), Math.abs(h)); x = st.x0 + Math.sign(w || 1) * m; y = st.y0 + Math.sign(h || 1) * m; }
+    }
+    st.x1 = x; st.y1 = y; st.center = p.alt; if (Math.hypot(p.sx - st.sx, p.sy - st.sy) > 3) st.moved = true;
+    if (!this.pend) { this.pend = true; requestAnimationFrame(() => { this.pend = false; if (this.st) this.render(); }); }
+  },
+  path() {
+    const st = this.st, p = new Path2D();
+    let { x0, y0, x1, y1 } = st;
+    if (st.center && this.kind !== 'line') { x0 = st.x0 - (x1 - st.x0); y0 = st.y0 - (y1 - st.y0); }
+    const x = Math.min(x0, x1), y = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0), cx = x + w / 2, cy = y + h / 2;
+    if (this.kind === 'line') { p.moveTo(x0, y0); p.lineTo(x1, y1); }
+    else if (this.kind === 'ellipse') p.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+    else if (this.kind === 'rect') { if (this.radius > 0 && p.roundRect) p.roundRect(x, y, w, h, Math.min(this.radius, w / 2, h / 2)); else p.rect(x, y, w, h); }
+    else {
+      const n = this.kind === 'star' ? this.sides * 2 : this.sides;
+      for (let i = 0; i < n; i++) { const a = -Math.PI / 2 + i * 2 * Math.PI / n, k = this.kind === 'star' && i % 2 ? 0.45 : 1; const px = cx + Math.cos(a) * w / 2 * k, py = cy + Math.sin(a) * h / 2 * k; i ? p.lineTo(px, py) : p.moveTo(px, py); }
+      p.closePath();
+    }
+    return p;
+  },
+  render() {
+    const st = this.st, d = Engine.doc, A = Engine._s.active.ctx, t = Engine.scratch('tmp').ctx, path = this.path();
+    t.save(); t.setTransform(1, 0, 0, 1, 0, 0); t.globalAlpha = 1; t.globalCompositeOperation = 'source-over'; t.clearRect(0, 0, d.w, d.h);
+    t.lineJoin = 'round'; t.lineCap = 'round'; t.lineWidth = this.width;
+    const fg = U.rgbStr(Colors.rgb()), bg = U.rgbStr(Colors.prevRgb());
+    if (this.kind === 'line') { t.strokeStyle = fg; t.stroke(path); }
+    else {
+      if (this.fill) { t.fillStyle = fg; t.fill(path); }
+      if (this.stroke || !this.fill) { t.strokeStyle = this.fill ? bg : fg; t.stroke(path); }
+    }
+    if (Sel.active) { t.globalCompositeOperation = 'destination-in'; t.drawImage(Sel.mask, 0, 0); }
+    t.restore();
+    A.save(); A.globalCompositeOperation = 'copy'; A.drawImage(st.L.canvas, 0, 0);
+    A.globalCompositeOperation = st.L.alphaLock ? 'source-atop' : 'source-over'; A.drawImage(Engine._s.tmp.canvas, 0, 0); A.restore();
+    Engine.renderAll();
+  },
+  up() { const st = this.st; if (!st) return; if (st.moved) { this.render(); this.st = null; Engine.commit(Engine.full(), 'Фигура'); } else { this.st = null; Engine.endOverride(); Engine.renderAll(); } },
+  cancel() { if (this.st) { this.st = null; Engine.endOverride(); Engine.renderAll(); } }
+};
+
+/* ---------- рука и лупа ---------- */
+const HandTool = {
+  down(p) { this.last = [p.sx, p.sy]; Input.cv.style.cursor = 'grabbing'; },
+  move(p) { if (!this.last) return; View.ox += p.sx - this.last[0]; View.oy += p.sy - this.last[1]; this.last = [p.sx, p.sy]; View.requestDraw(); },
+  up() { this.last = null; Input.cv.style.cursor = ''; UI.viewChanged(); }, cancel() { this.last = null; }
+};
+const ZoomTool = {
+  down(p) { this.s = { sx: p.sx, sy: p.sy, x: p.sx, moved: false, out: p.alt || p.button === 2 }; },
+  move(p) { const s = this.s; if (!s) return; const dx = p.sx - s.x; if (Math.abs(p.sx - s.sx) > 4) s.moved = true; if (s.moved) { View.zoomAt(s.sx, s.sy, Math.exp(dx * 0.01)); s.x = p.sx; } },
+  up() { const s = this.s; this.s = null; if (s && !s.moved) View.zoomAt(s.sx, s.sy, s.out ? 0.5 : 2); UI.viewChanged(); }, cancel() { this.s = null; }
+};
+
 Object.assign(Tools.map, {
   brush: paintTool('brush'), smudge: paintTool('smudge'), eraser: paintTool('eraser'), clone: paintTool('clone'),
-  fill: Fill, picker: Picker.tool, select: SelectTool, transform: Xform, text: TextTool, liquify: Liquify
+  fill: Fill, picker: Picker.tool, select: SelectTool, transform: Xform, text: TextTool, liquify: Liquify,
+  gradient: GradientTool, shapes: ShapeTool, hand: HandTool, zoom: ZoomTool
 });

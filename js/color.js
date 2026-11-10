@@ -65,7 +65,7 @@ const Palettes = {
 const ColorUI = {
   tab: 'wheel', harm: 'comp',
   build() {
-    const root = U.el('div', { class: 'cpanel' });
+    const compact = this.compact, root = U.el('div', { class: 'cpanel' + (compact ? ' compact' : '') });
     const top = U.el('div', { class: 'ctop' });
     const curSw = U.el('div', { class: 'cswatch', title: 'Текущий цвет' }), prevSw = U.el('button', { class: 'cswatch', title: 'Предыдущий цвет (коснитесь, чтобы поменять местами)', onclick: () => Colors.swap() });
     const hex = U.el('input', { class: 'input', style: { width: '96px', height: '30px' }, onchange: () => { const c = U.hex2rgb(hex.value); if (c) Colors.set(c); } });
@@ -100,7 +100,7 @@ const ColorUI = {
   },
   local(e, el) { const r = el.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top, r.width, r.height]; },
   wheel(body) {
-    const S = 260, dpr = Math.min(2, window.devicePixelRatio || 1);
+    const S = this.compact ? 196 : 260, dpr = Math.min(2, window.devicePixelRatio || 1);
     const c = U.el('canvas', { class: 'cwheel', width: S * dpr, height: S * dpr, style: { width: S + 'px', height: S + 'px' } }), x = c.getContext('2d');
     body.append(c);
     const R = S / 2, ring = 22, half = (R - ring - 8) / Math.SQRT2;
