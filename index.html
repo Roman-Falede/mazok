@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#141518">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="description" content="Мазок — приложение для цифрового рисования: кисти, слои, выделение, трансформация, коррекция, анимация и таймлапс.">
+<title>Мазок</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="stage"></canvas>
+  <header id="topbar"></header>
+  <nav id="rail"></nav>
+  <div id="sliders"></div>
+  <div id="optbar" class="hidden"></div>
+  <div id="animbar" class="hidden"></div>
+  <div id="hint"></div>
+  <div id="sizepreview"></div>
+  <div id="loupe"><div class="new"></div><div class="old"></div></div>
+</div>
+<div id="popovers"></div>
+<div id="gallery"></div>
+<div id="modals"></div>
+<div id="toast"></div>
+
+<script src="js/util.js"></script>
+<script src="js/store.js"></script>
+<script src="js/brushes.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/guides.js"></script>
+<script src="js/view.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/adjust.js"></script>
+<script src="js/color.js"></script>
+<script src="js/formats.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/panels.js"></script>
+<script src="js/gallery.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
