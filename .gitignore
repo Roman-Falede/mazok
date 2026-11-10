@@ -1,4 +1,5 @@
 dist/
+rust/target/
 build/windows/sdk/
 build/android/sdk/
 build/android/*.keystore
