@@ -107,6 +107,7 @@ impl App {
         let _ = std::fs::create_dir_all(&docs_dir);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         crate::platform::install_paste_hook();
+        setup_fonts(&cc.egui_ctx);
         let mut app = App {
             sh, pending: None, drop_hover: false, ed: None, items: vec![], tex: HashMap::new(), ui: UiState::default(), saver: None, fonts: platform::fonts(), toast: None,
             now: 0.0, docs_dir, visuals: None, last_settings_save: 0.0, test: crate::autotest::AutoTest::from_env(),
@@ -672,10 +673,16 @@ impl App {
         let accent = egui::Color32::from_rgb(61, 143, 230);
         v.selection.bg_fill = accent;
         if !key.0 {
-            v.panel_fill = egui::Color32::from_gray(50);
-            v.window_fill = egui::Color32::from_gray(46);
-            v.extreme_bg_color = egui::Color32::from_gray(34);
-            v.faint_bg_color = egui::Color32::from_gray(56);
+            v.panel_fill = egui::Color32::from_gray(30);
+            v.window_fill = egui::Color32::from_gray(38);
+            v.extreme_bg_color = egui::Color32::from_gray(22);
+            v.faint_bg_color = egui::Color32::from_gray(48);
+            v.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(205);
+            v.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(225);
+            v.widgets.inactive.weak_bg_fill = egui::Color32::from_gray(52);
+            v.widgets.inactive.bg_fill = egui::Color32::from_gray(52);
+            v.window_corner_radius = egui::CornerRadius::same(12);
+            v.menu_corner_radius = egui::CornerRadius::same(10);
         } else {
             v.panel_fill = egui::Color32::from_gray(236);
             v.window_fill = egui::Color32::from_gray(244);
@@ -686,6 +693,20 @@ impl App {
             s.spacing.button_padding = egui::vec2(7.0, 4.0);
             s.spacing.slider_width = 110.0;
             s.interaction.tooltip_delay = 0.4;
+            // крупнее и чётче: на телефоне мелкий текст сливается
+            let k = if cfg!(target_os = "android") { 1.08 } else { 1.0 };
+            use egui::{FontFamily, FontId, TextStyle};
+            s.text_styles = [
+                (TextStyle::Small, FontId::new(11.5 * k, FontFamily::Proportional)),
+                (TextStyle::Body, FontId::new(14.0 * k, FontFamily::Proportional)),
+                (TextStyle::Button, FontId::new(14.0 * k, FontFamily::Proportional)),
+                (TextStyle::Heading, FontId::new(20.0 * k, FontFamily::Proportional)),
+                (TextStyle::Monospace, FontId::new(13.0 * k, FontFamily::Monospace)),
+            ].into();
+            if cfg!(target_os = "android") {
+                s.spacing.interact_size.y = 30.0;
+                s.spacing.button_padding = egui::vec2(9.0, 6.0);
+            }
         });
         if (key.1 - 1.0).abs() > 0.01 {
             ctx.set_zoom_factor(key.1.clamp(0.6, 2.0));
@@ -776,4 +797,21 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::autotest::AutoTest::input(self, raw);
     }
+}
+
+/// Системный шрифт интерфейса: Roboto на Android, Segoe UI на Windows (чётче встроенного Ubuntu Light).
+fn setup_fonts(ctx: &egui::Context) {
+    let candidates: &[&str] = if cfg!(target_os = "android") {
+        &["/system/fonts/RobotoStatic-Regular.ttf", "/system/fonts/Roboto-Regular.ttf", "/system/fonts/NotoSans-Regular.ttf", "/system/fonts/DroidSans.ttf"]
+    } else {
+        &[r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\arial.ttf"]
+    };
+    let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else { return };
+    // шрифт должен открываться и содержать кириллицу
+    let ok = ab_glyph::FontRef::try_from_slice(&bytes).map_or(false, |f| { use ab_glyph::Font; f.glyph_id('Ж').0 != 0 && f.glyph_id('a').0 != 0 });
+    if !ok { return; }
+    let mut defs = egui::FontDefinitions::default();
+    defs.font_data.insert("system-ui".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+    if let Some(f) = defs.families.get_mut(&egui::FontFamily::Proportional) { f.insert(0, "system-ui".into()); }
+    ctx.set_fonts(defs);
 }

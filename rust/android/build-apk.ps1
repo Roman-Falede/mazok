@@ -4,8 +4,8 @@
 param(
   [string]$Sdk = $env:ANDROID_HOME,
   [string]$Ndk = '',
-  [string]$VersionName = '3.2.0',
-  [int]$VersionCode = 5,
+  [string]$VersionName = '3.3.0',
+  [int]$VersionCode = 6,
   [switch]$SkipCargo
 )
 $ErrorActionPreference = 'Stop'
@@ -13,12 +13,14 @@ $here = $PSScriptRoot
 $crate = (Resolve-Path (Join-Path $here '..')).Path
 $root = (Resolve-Path (Join-Path $here '..\..')).Path
 if (-not $Sdk -or -not (Test-Path $Sdk)) { throw 'Укажите папку Android SDK: -Sdk <путь> или переменную ANDROID_HOME' }
-if (-not $Ndk) { $Ndk = (Get-ChildItem (Join-Path $Sdk 'ndk') -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName }
-$bt = (Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+if (-not $Ndk) { $Ndk = (Get-ChildItem (Join-Path $Sdk 'ndk') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'toolchains\llvm') } | Sort-Object Name -Descending | Select-Object -First 1).FullName }
+$bt = (Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } | Sort-Object Name -Descending | Select-Object -First 1).FullName
 $aapt2 = Join-Path $bt 'aapt2.exe'; $zipalign = Join-Path $bt 'zipalign.exe'; $apksigner = Join-Path $bt 'apksigner.bat'; $d8 = Join-Path $bt 'd8.bat'
 $jar = Join-Path $Sdk 'platforms\android-35\android.jar'
 $llvm = Join-Path $Ndk 'toolchains\llvm\prebuilt\windows-x86_64\bin'
 foreach ($p in $aapt2, $zipalign, $apksigner, $d8, $jar, $llvm) { if (-not (Test-Path $p)) { throw "Не найден $p" } }
+# короткий путь 8.3: длинные пути (с кириллицей) превышают MAX_PATH у clang из NDK
+try { $llvm = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($llvm).ShortPath } catch { }
 # Инструменты пишут ход работы в stderr — в Windows PowerShell 5.1 это не должно считаться ошибкой
 function Run($exe, [string[]]$a) {
   $ErrorActionPreference = 'Continue'
@@ -31,7 +33,9 @@ function Run($exe, [string[]]$a) {
 # 1. Библиотека libmazok.so
 $target = 'aarch64-linux-android'
 $clang = Join-Path $llvm 'aarch64-linux-android26-clang.cmd'
-$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $clang
+# clang.exe напрямую (обёртка .cmd идёт через cmd.exe с пределом 8191 символ — длинные пути его превышают)
+$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = Join-Path $llvm 'clang.exe'
+$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = '-C link-arg=--target=aarch64-linux-android26'
 $env:CC_aarch64_linux_android = $clang
 $env:CXX_aarch64_linux_android = Join-Path $llvm 'aarch64-linux-android26-clang++.cmd'
 $env:AR_aarch64_linux_android = Join-Path $llvm 'llvm-ar.exe'

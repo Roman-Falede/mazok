@@ -20,6 +20,9 @@ enum Step {
     Click(f32, f32),
     Wait(u32),
     Shot(&'static str),
+    Size(f32, f32),
+    /// Штрих пером: (x, y, нажим) — события касания с силой нажима.
+    Pen(Vec<(f32, f32, f32)>),
     Quit,
 }
 
@@ -41,6 +44,7 @@ pub struct AutoTest {
     pub dir: PathBuf,
     steps: VecDeque<Step>,
     stroke: Option<(Vec<Pos2>, usize)>,
+    pen: Option<(Vec<(Pos2, f32)>, usize)>,
     wait: u32,
     shots: usize,
     pub log: AutoLog,
@@ -133,20 +137,18 @@ impl AutoTest {
             ed.undo(); ed.undo(); ed.redo();
             l.check(ed.hist.pos == p - 1, format!("отмена/повтор ({} → {})", p, ed.hist.pos));
             ed.redo();
-            a.ui.dock_tab[1] = 1;
-            a.ui.dock_tab[2] = 0;
+            pop(a, crate::ui::Pop::Studio);
         })));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("03-brush-settings.png"));
-        s.push_back(run(Box::new(|a, _| { a.sh.prefs.ui_mode = "touch".into(); a.ui.win.layers = true; })));
+        s.push_back(run(Box::new(|a, _| pop(a, crate::ui::Pop::Layers))));
         s.push_back(Step::Wait(8));
-        s.push_back(Step::Shot("04-compact-layers.png"));
-        s.push_back(run(Box::new(|a, _| { a.ui.win.layers = false; a.ui.win.brushes = true; })));
+        s.push_back(Step::Shot("04-layers-popover.png"));
+        s.push_back(run(Box::new(|a, _| pop(a, crate::ui::Pop::Brushes))));
         s.push_back(Step::Wait(8));
-        s.push_back(Step::Shot("05-compact-brushes.png"));
+        s.push_back(Step::Shot("05-brush-library.png"));
         s.push_back(run(Box::new(|a, l| {
-            a.sh.prefs.ui_mode = "auto".into();
-            a.ui.win.brushes = false;
+            a.ui.pop = None;
             a.to_gallery();
             l.check(a.items.iter().any(|i| i.name == "Автотест"), "рисунок сохранён и есть в галерее");
         })));
@@ -206,14 +208,18 @@ impl AutoTest {
         s.push_back(run(Box::new(|a, l| clipboard_finish(a, l))));
         s.push_back(Step::Wait(4));
         s.push_back(run(Box::new(|a, l| import_test(a, l))));
-        s.push_back(run(Box::new(|a, _| { a.ui.dock_tab[0] = 1; a.ui.dock_tab[1] = 0; a.ui.brush_cat = "imported".into(); })));
+        s.push_back(run(Box::new(|a, _| { a.ui.color_tab = 1; pop(a, crate::ui::Pop::Color); })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("08-palettes-imported-brushes.png"));
+        s.push_back(Step::Shot("08-palettes.png"));
+        s.push_back(run(Box::new(|a, _| { a.ui.brush_cat = "imported".into(); pop(a, crate::ui::Pop::Brushes); })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("08b-imported-brushes.png"));
+        s.push_back(run(Box::new(|a, _| a.ui.pop = None)));
         s.push_back(run(Box::new(|a, l| layers_test(a, l))));
-        s.push_back(run(Box::new(|a, _| { a.ui.dock_tab[2] = 0; a.ui.dock_collapsed = [false, true, false]; a.sh.prefs.layer_thumb = 48.0; })));
+        s.push_back(run(Box::new(|a, _| { a.sh.prefs.ui_mode = "desk".into(); a.ui.dock_tab[2] = 0; a.ui.dock_collapsed = [false, true, false]; a.sh.prefs.layer_thumb = 48.0; })));
         s.push_back(Step::Wait(6));
-        s.push_back(Step::Shot("09-layers-panel.png"));
-        s.push_back(run(Box::new(|a, l| { a.ui.dock_collapsed = [false; 3]; layers_test2(a, l) })));
+        s.push_back(Step::Shot("09-classic-layers-panel.png"));
+        s.push_back(run(Box::new(|a, l| { a.ui.dock_collapsed = [false; 3]; a.sh.prefs.ui_mode = "studio".into(); layers_test2(a, l) })));
         s.push_back(run(Box::new(|a, _| {
             // стабилизатор: дрожащая линия
             a.sh.prefs.stabilizer = 0.5;
@@ -227,6 +233,27 @@ impl AutoTest {
             let h = b.map_or(0, |b| b.h);
             l.check(b.is_some() && h < 40, format!("стабилизатор сгладил дрожание (высота линии {h} px)"));
             a.sh.prefs.stabilizer = 0.0;
+            // нажим пера: кисть с сужением конца — но автосужение выключено
+            let id = a.sh.brushes.create();
+            let mut b = a.sh.brushes.get(&id).clone();
+            b.p_size = 1.0; b.min_size = 0.05; b.taper_end = 8.0; b.taper_start = 0.0; b.j_size = 0.0; b.streamline = 0.0; b.hardness = 1.0;
+            a.sh.brushes.update(b);
+            brush(a, &id, 0.6, [20, 20, 120]);
+            *LT_IDS.lock().unwrap() = vec![id];
+            a.ed.as_mut().unwrap().layer_add();
+        })));
+        s.push_back(Step::Pen((0..=90).map(|i| { let t = i as f32 / 90.0; (0.15 + 0.7 * t, 0.3, if t < 0.5 { 0.08 + 1.84 * t } else { 1.0 }) }).collect()));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_mut().unwrap();
+            let avg = |ed: &crate::editor::Editor, x: f32| (0..7).map(|k| thick_at(ed, x + (k as f32 - 3.0) * 0.002, 0.3)).sum::<i32>() / 7;
+            let (t0, t1, t2) = (avg(ed, 0.18), avg(ed, 0.6), avg(ed, 0.82));
+            l.check(t0 > 0 && t1 > t0 * 2, format!("толщина зависит от нажима пера: слабый {t0} px, сильный {t1} px"));
+            l.check(t2 * 10 >= t1 * 8, format!("без автосужения конец штриха не заостряется: середина {t1} px, конец {t2} px"));
+            let pen = crate::editor::LAST_PEN.load(std::sync::atomic::Ordering::Relaxed);
+            l.check(pen > 900, format!("нажим пера дошёл до программы ({:.2})", pen as f32 / 1000.0));
+            if let Some(id) = LT_IDS.lock().unwrap().first().cloned() { a.sh.brushes.remove(&id); }
+            brush(a, "pencil_hb", 0.3, [20, 20, 30]);
             a.ui.new_canvas = Some(crate::ui::NewCanvas::default());
         })));
         s.push_back(Step::Wait(6));
@@ -238,8 +265,31 @@ impl AutoTest {
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("12-light.png"));
         s.push_back(run(Box::new(|a, _| { a.sh.prefs.light = false; })));
+        // ширина телефона: интерфейс как в Procreate не должен наезжать сам на себя
+        s.push_back(Step::Size(412.0, 800.0));
+        s.push_back(Step::Wait(12));
+        s.push_back(run(Box::new(|a, _| { if let Some(ed) = a.ed.as_mut() { ed.fit(); } })));
+        s.push_back(Step::Wait(4));
+        s.push_back(Step::Shot("13-phone-editor.png"));
+        s.push_back(run(Box::new(|a, _| pop(a, crate::ui::Pop::Brushes))));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("14-phone-brushes.png"));
+        s.push_back(run(Box::new(|a, _| pop(a, crate::ui::Pop::Layers))));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("15-phone-layers.png"));
+        s.push_back(run(Box::new(|a, _| { a.ui.actions_tab = 8; pop(a, crate::ui::Pop::Actions); })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("16-phone-settings.png"));
+        s.push_back(run(Box::new(|a, _| pop(a, crate::ui::Pop::Studio))));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("17-phone-brush-studio.png"));
+        s.push_back(run(Box::new(|a, _| { a.ui.pop = None; if let Some(ed) = a.ed.as_mut() { ed.set_tool(Tool::Select); } })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("18-phone-selection.png"));
+        s.push_back(Step::Size(1400.0, 900.0));
+        s.push_back(Step::Wait(6));
         s.push_back(Step::Quit);
-        Some(AutoTest { dir, steps: s, stroke: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
+        Some(AutoTest { dir, steps: s, stroke: None, pen: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
     }
 
     /// Вызывается перед кадром: подмешивает события мыши.
@@ -249,6 +299,22 @@ impl AutoTest {
         raw.events.retain(|e| !matches!(e, Event::PointerMoved(_) | Event::MouseMoved(_) | Event::PointerButton { .. } | Event::Touch { .. } | Event::PointerGone | Event::MouseWheel { .. }));
         let rect = app.ed.as_ref().map(|e| e.canvas_rect);
         let to = |p: (f32, f32)| rect.map_or(Pos2::ZERO, |r| Pos2::new(r.left() + r.width() * p.0, r.top() + r.height() * p.1));
+        if let Some((pts, i)) = &mut t.pen {
+            let ev = |pos: Pos2, f: f32, phase: egui::TouchPhase| Event::Touch { device_id: egui::TouchDeviceId(1), id: egui::TouchId(7), phase, pos, force: Some(f) };
+            if *i == 0 {
+                raw.events.push(ev(pts[0].0, pts[0].1, egui::TouchPhase::Start));
+                *i = 1;
+            } else if *i < pts.len() {
+                let end = (*i + 3).min(pts.len());
+                for p in &pts[*i..end] { raw.events.push(ev(p.0, p.1, egui::TouchPhase::Move)); }
+                *i = end;
+            } else {
+                let p = *pts.last().unwrap();
+                raw.events.push(ev(p.0, p.1, egui::TouchPhase::End));
+                t.pen = None;
+            }
+            return;
+        }
         if let Some((pts, i)) = &mut t.stroke {
             let now = Instant::now();
             if let Some(l) = t.last { t.stroke_frames.push(now.duration_since(l).as_secs_f64() * 1000.0); }
@@ -272,6 +338,11 @@ impl AutoTest {
         }
         if t.wait > 0 { return; }
         match t.steps.front() {
+            Some(Step::Pen(_)) => {
+                if let Some(Step::Pen(p)) = t.steps.pop_front() {
+                    t.pen = Some((p.into_iter().map(|(x, y, f)| (to((x, y)), f)).collect(), 0));
+                }
+            }
             Some(Step::Stroke(_)) => {
                 if let Some(Step::Stroke(p)) = t.steps.pop_front() {
                     t.stroke = Some((p.into_iter().map(to).collect(), 0));
@@ -304,7 +375,7 @@ impl AutoTest {
             }
         });
         ctx.request_repaint();
-        if t.stroke.is_some() {
+        if t.stroke.is_some() || t.pen.is_some() {
             app.test = Some(t);
             return;
         }
@@ -325,6 +396,7 @@ impl AutoTest {
         match t.steps.pop_front() {
             Some(Step::Run(f)) => { let mut log = std::mem::take(&mut t.log); f(app, &mut log); t.log = log; t.wait = 2; }
             Some(Step::Wait(n)) => t.wait = n,
+            Some(Step::Size(w, h)) => { ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h))); t.wait = 4; }
             Some(Step::Shot(name)) => { t.shots += 1; ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(name))); t.wait = 3; }
             Some(Step::Quit) | None => { t.quit = true; t.wait = 4; }
             Some(s) => t.steps.push_front(s),
@@ -455,7 +527,9 @@ fn clipboard_test(a: &mut App, l: &mut AutoLog) {
     let _ = (a, l);
 }
 
+#[cfg_attr(target_os = "android", allow(dead_code))]
 static CLIP_BACKUP: std::sync::Mutex<Option<(Option<(usize, usize, Vec<u8>)>, Option<String>)>> = std::sync::Mutex::new(None);
+#[cfg_attr(target_os = "android", allow(dead_code))]
 static N_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn clipboard_finish(a: &mut App, l: &mut AutoLog) {
@@ -680,4 +754,23 @@ fn layers_test2(a: &mut App, l: &mut AutoLog) {
     ed.undo();
     l.check(ed.doc.find(&ids[2]).map_or(false, |g| ed.doc.layers[g].group), "отмена объединения вернула папку");
     let _ = gi;
+}
+/// Открыть всплывающую панель интерфейса «как Procreate» (у правого края верхней полосы).
+fn pop(a: &mut App, p: crate::ui::Pop) {
+    a.ui.pop = Some(p);
+    a.ui.pop_anchor = egui::Rect::from_min_size(egui::pos2(10_000.0, 4.0), egui::vec2(40.0, 40.0));
+}
+
+/// Толщина линии активного слоя по вертикали в точке (доли области просмотра).
+fn thick_at(ed: &crate::editor::Editor, x: f32, y: f32) -> i32 {
+    let r = ed.canvas_rect;
+    let (dx, dy) = ed.view.to_doc(Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y));
+    let img = &ed.doc.layer().img;
+    let (cx, cy) = (dx as i32, dy as i32);
+    if cx < 0 || cx as usize >= img.w { return 0; }
+    let mut n = 0;
+    for yy in (cy - 150).max(0)..(cy + 150).min(img.h as i32) {
+        if img.px[img.idx(cx as usize, yy as usize) + 3] > 60 { n += 1; }
+    }
+    n
 }

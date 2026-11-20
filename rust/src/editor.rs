@@ -236,6 +236,10 @@ pub struct Editor {
     pub mask_edit: bool,
     /// Дополнительно выбранные слои (id), кроме активного.
     pub multi: Vec<String>,
+    /// Пропустить ввод на холсте в этом кадре (касание закрыло всплывающую панель).
+    pub block_input: bool,
+    /// Последний нажим пера (если перо его передаёт).
+    last_force: Option<f32>,
 }
 
 /* ---------- приёмники отпечатков ---------- */
@@ -523,6 +527,8 @@ impl Editor {
             fill_expand: 1,
             mask_edit: false,
             multi: vec![],
+            block_input: false,
+            last_force: None,
             doc,
         };
         e.invalidate_all();
@@ -614,6 +620,10 @@ impl Editor {
             self.fitted = true;
         }
         self.handle_input(ui, rect, sh);
+        if self.hover.is_some() && self.tool.is_paint() {
+            // над холстом вместо стрелки мыши — контур кисти (или перекрестье, если контур выключен)
+            ctx.set_cursor_icon(if sh.prefs.cursor { egui::CursorIcon::None } else { egui::CursorIcon::Crosshair });
+        }
         self.tick(sh);
         self.flush_active(sh);
         self.refresh(&ctx);
@@ -799,6 +809,7 @@ impl Editor {
         let (events, mods, multi, scroll, zoom, hover) = ctx.input(|i| (i.events.clone(), i.modifiers, i.multi_touch(), i.raw_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
         let over = |p: Pos2| rect.contains(p) && ctx.layer_id_at(p).map_or(true, |l| l.order == egui::Order::Background);
         self.hover = hover.filter(|p| over(*p));
+        if std::mem::take(&mut self.block_input) { return; }
         if let Some(hp) = hover {
             if over(hp) {
                 if zoom != 1.0 {
@@ -832,7 +843,7 @@ impl Editor {
                                 if sh.prefs.touch_draw {
                                     self.draw_touch = Some(id);
                                     self.tool_t0 = self.now;
-                                    let pr = force.filter(|f| *f > 0.0 && *f <= 1.0).unwrap_or(1.0);
+                                    let pr = self.touch_pressure(force);
                                     self.down(pos, pr, false, mods, sh);
                                 } else {
                                     self.gesture = Some((self.now, 0.0, false, 1));
@@ -851,7 +862,7 @@ impl Editor {
                                 let prev = *t;
                                 *t = pos;
                                 if self.draw_touch == Some(id) {
-                                    let pr = force.filter(|f| *f > 0.0 && *f <= 1.0).unwrap_or(1.0);
+                                    let pr = self.touch_pressure(force);
                                     self.moved(pos, pr, mods, sh);
                                 } else if self.touches.len() == 1 && self.gesture.is_some() {
                                     let d = pos - prev;
@@ -1208,7 +1219,12 @@ impl Editor {
         }
         let tool = self.tool;
         let ts = tool_state(sh, tool).clone();
-        let b = sh.brushes.get(&ts.brush_id).clone();
+        let mut b = sh.brushes.get(&ts.brush_id).clone();
+        if !sh.prefs.auto_taper {
+            // размер меняет только нажим пера, без автоматического сужения концов
+            b.taper_start = 0.0;
+            b.taper_end = 0.0;
+        }
         let size = brush::size_px(&b, ts.size);
         self.begin_work();
         if is_vec && mode == PaintMode::Erase {
@@ -3089,4 +3105,21 @@ pub fn render_text(spec: &TextSpec, w: usize, h: usize, font: Option<&[u8]>) -> 
         }
     }
     img
+}
+
+/// Последний нажим пера ×1000 (0 — ещё не было): для проверки в настройках.
+pub static LAST_PEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+impl Editor {
+    /// Нажим из касания: если перо в этом событии силу не передало — берём последнее известное значение.
+    fn touch_pressure(&mut self, force: Option<f32>) -> f32 {
+        match force.filter(|f| *f > 0.0 && *f <= 1.0) {
+            Some(f) => {
+                self.last_force = Some(f);
+                LAST_PEN.store((f * 1000.0).round().max(1.0) as u32, std::sync::atomic::Ordering::Relaxed);
+                f
+            }
+            None => self.last_force.unwrap_or(1.0),
+        }
+    }
 }

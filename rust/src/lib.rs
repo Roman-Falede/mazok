@@ -23,7 +23,7 @@ use std::path::PathBuf;
 const ICON: &[u8] = include_bytes!("../../icons/icon-192.png");
 
 fn viewport() -> egui::ViewportBuilder {
-    let mut vb = egui::ViewportBuilder::default().with_title("Мазок").with_inner_size([1400.0, 900.0]).with_min_inner_size([480.0, 400.0]);
+    let mut vb = egui::ViewportBuilder::default().with_title("Мазок").with_inner_size([1400.0, 900.0]).with_min_inner_size([360.0, 400.0]);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON) {
         vb = vb.with_icon(std::sync::Arc::new(icon));
     }
