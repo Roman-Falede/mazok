@@ -26,10 +26,12 @@ pub struct NewCanvas {
     pub h: usize,
     pub bg: [u8; 3],
     pub transparent: bool,
+    /// Поле для рисования вокруг листа (доля размера листа с каждой стороны).
+    pub margin: f32,
 }
 impl Default for NewCanvas {
     fn default() -> Self {
-        NewCanvas { name: "Без названия".into(), w: 2048, h: 2048, bg: [255, 255, 255], transparent: false }
+        NewCanvas { name: "Без названия".into(), w: 2048, h: 2048, bg: [255, 255, 255], transparent: false, margin: 0.15 }
     }
 }
 
@@ -75,6 +77,10 @@ pub struct UiState {
     pub op_before: Option<(usize, Props)>,
     pub bset_open: [bool; 9],
     pub palette_export: Option<(usize, &'static str)>,
+    /// Открытое окно «Экспорт листа».
+    pub export: Option<crate::app::ExportOpts>,
+    /// Последние настройки экспорта (окно открывается с ними).
+    pub last_export: Option<crate::app::ExportOpts>,
     /// Протяжка по глазкам: какую видимость ставить.
     /// Открытая всплывающая панель (интерфейс как в Procreate) и кнопка, у которой она открыта.
     pub pop: Option<Pop>,
@@ -99,7 +105,7 @@ impl Default for UiState {
         UiState {
             new_canvas: None, rename: None, layer_rename: None, resize: None, text: None, settings: false, help: false, confirm_delete: None,
             feather: None, dock_tab: [0, 0, 0], brush_cat: String::new(), win: Wins::default(), hex: String::new(), hsva: None, op_before: None,
-            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, pop: None, pop_anchor: Rect::NOTHING, safe: [0.0; 4], safe_t: -10.0, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
+            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, export: None, last_export: None, pop: None, pop_anchor: Rect::NOTHING, safe: [0.0; 4], safe_t: -10.0, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
         }
     }
 }
@@ -319,6 +325,7 @@ fn menu_bar(ui: &mut Ui, cx: &mut Cx) {
             ui.separator();
             if ui.add(egui::Button::new("Сохранить").shortcut_text("Ctrl+S")).clicked() { cx.acts.push("save"); ui.close_menu(); }
             if ui.add(egui::Button::new("Сохранить как…").shortcut_text("Ctrl+Shift+S")).on_hover_text("Сохранить проект .mazok в выбранную папку").clicked() { cx.acts.push("save_as"); ui.close_menu(); }
+            if ui.add(egui::Button::new("Экспорт листа…").shortcut_text("Ctrl+Alt+Shift+W")).on_hover_text("PNG, JPEG, WebP, PDF, PSD, TIFF, BMP, TGA, GIF — с выбором размера и фона").clicked() { cx.acts.push("export_dialog"); ui.close_menu(); }
             if ui.button("Быстрый экспорт PNG").on_hover_text("В папку для сохранения из настроек").clicked() { cx.acts.push("quick_png"); ui.close_menu(); }
             ui.menu_button("Экспорт", |ui| {
                 for (k, n) in [("export_png", "PNG"), ("export_jpeg", "JPEG"), ("export_psd", "PSD со слоями"), ("export_mazok", "Проект Мазок (.mazok)"), ("export_layers", "Слои в PNG (ZIP)"), ("export_gif", "GIF (слои — кадры)")] {
@@ -387,7 +394,15 @@ fn image_menu(ui: &mut Ui, cx: &mut Cx) {
         }
     });
     ui.separator();
-    if ui.button("Размер изображения и холста…").clicked() { cx.st.resize = Some(ResizeDlg { w: ed.doc.w, h: ed.doc.h, keep: true, scale: false, anchor: (1, 1) }); ui.close_menu(); }
+    let sr = ed.doc.sheet_rect();
+    if ui.button(if ed.doc.sheet.is_some() { "Размер изображения и листа…" } else { "Размер изображения и холста…" }).clicked() { cx.st.resize = Some(ResizeDlg { w: sr.w as usize, h: sr.h as usize, keep: true, scale: false, anchor: (1, 1) }); ui.close_menu(); }
+    ui.menu_button("Поле вокруг листа", |ui| {
+        ui.label(egui::RichText::new("Можно рисовать за краем листа: это видно и сохраняется в проекте, но не экспортируется").weak());
+        let cur = ed.doc.sheet.map(|s| (s.x as f32 / s.w.max(1) as f32 * 100.0).round() / 100.0).unwrap_or(0.0);
+        for (v, n) in [(0.0, "Без поля (обрезать по листу)"), (0.15, "15 %"), (0.3, "30 %"), (0.5, "50 %")] {
+            if ui.selectable_label((cur - v).abs() < 0.02, n).clicked() { ed.set_sheet_margin(v); ui.close_menu(); }
+        }
+    });
     if ui.button("Повернуть на 90° по часовой").clicked() { ed.rotate_canvas(true); ui.close_menu(); }
     if ui.button("Повернуть на 90° против часовой").clicked() { ed.rotate_canvas(false); ui.close_menu(); }
     if ui.button("Отразить холст по горизонтали").clicked() { ed.flip_canvas(true); ui.close_menu(); }
@@ -1519,6 +1534,7 @@ impl App {
     /* ---------- диалоги ---------- */
 
     pub fn dialogs_ui(&mut self, ctx: &egui::Context) {
+        self.export_dialog(ctx);
         let win = |t: &str| egui::Window::new(t.to_string()).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
         if let Some(nc) = &mut self.ui.new_canvas {
             let mut create = false;
@@ -1537,8 +1553,14 @@ impl App {
                     ui.label("Высота"); ui.add(egui::DragValue::new(&mut nc.h).range(16..=8192).suffix(" px"));
                 });
                 ui.horizontal(|ui| { ui.label("Фон"); ui.color_edit_button_srgb(&mut nc.bg); ui.checkbox(&mut nc.transparent, "Прозрачный"); });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Поле вокруг листа");
+                    for (v, n) in [(0.0, "нет"), (0.15, "15 %"), (0.3, "30 %"), (0.5, "50 %")] { ui.selectable_value(&mut nc.margin, v, n); }
+                });
+                if nc.margin > 0.0 { ui.label(egui::RichText::new("Рисовать можно и за краем листа — в экспорт попадёт только лист").weak()); }
                 let budget: f64 = if cfg!(target_os = "android") { 700e6 } else { 2.5e9 };
-                ui.label(egui::RichText::new(format!("До {} слоёв на этом устройстве", ((budget / (nc.w * nc.h * 4) as f64) as usize).saturating_sub(4).clamp(3, 200))).weak());
+                let full = (nc.w as f64 * (1.0 + 2.0 * nc.margin as f64)) * (nc.h as f64 * (1.0 + 2.0 * nc.margin as f64));
+                ui.label(egui::RichText::new(format!("До {} слоёв на этом устройстве", ((budget / (full * 4.0)) as usize).saturating_sub(4).clamp(3, 200))).weak());
                 ui.horizontal(|ui| {
                     if ui.button("Отмена").clicked() { close = true; }
                     if ui.add(egui::Button::new(egui::RichText::new("Создать").color(Color32::WHITE)).fill(ACCENT)).clicked() { create = true; }
@@ -1546,7 +1568,7 @@ impl App {
             });
             if create {
                 let nc = self.ui.new_canvas.take().unwrap();
-                if nc.w * nc.h > 50_000_000 { self.toast("Слишком большой холст"); } else { self.create_doc(nc.name.trim(), nc.w, nc.h, nc.bg, !nc.transparent); }
+                if (nc.w as f32 * (1.0 + 2.0 * nc.margin)) * (nc.h as f32 * (1.0 + 2.0 * nc.margin)) > 50_000_000.0 { self.toast("Слишком большой холст"); } else { self.create_doc_margin(nc.name.trim(), nc.w, nc.h, nc.bg, !nc.transparent, nc.margin); }
             } else if close { self.ui.new_canvas = None; }
         }
         if let Some((id, name)) = &mut self.ui.rename {
@@ -1584,9 +1606,10 @@ impl App {
         }
         if let Some(rd) = &mut self.ui.resize {
             let (mut ok, mut close) = (false, false);
-            let (ow, oh) = self.ed.as_ref().map_or((1, 1), |e| (e.doc.w, e.doc.h));
-            win("Размер изображения и холста").show(ctx, |ui| {
-                ui.horizontal(|ui| { ui.selectable_value(&mut rd.scale, false, "Размер холста"); ui.selectable_value(&mut rd.scale, true, "Масштабировать изображение"); });
+            let (ow, oh) = self.ed.as_ref().map_or((1, 1), |e| { let s = e.doc.sheet_rect(); (s.w as usize, s.h as usize) });
+            let has_sheet = self.ed.as_ref().map_or(false, |e| e.doc.sheet.is_some());
+            win(if has_sheet { "Размер изображения и листа" } else { "Размер изображения и холста" }).show(ctx, |ui| {
+                ui.horizontal(|ui| { ui.selectable_value(&mut rd.scale, false, if has_sheet { "Размер листа" } else { "Размер холста" }); ui.selectable_value(&mut rd.scale, true, "Масштабировать изображение"); });
                 ui.horizontal(|ui| {
                     ui.label("Ширина");
                     if ui.add(egui::DragValue::new(&mut rd.w).range(1..=8192)).changed() && rd.keep { rd.h = ((rd.w as f32 * oh as f32 / ow as f32).round() as usize).max(1); }
@@ -1606,9 +1629,13 @@ impl App {
                 let rd = self.ui.resize.take().unwrap();
                 if let Some(ed) = &mut self.ed {
                     if (rd.w, rd.h) != (ow, oh) && rd.w * rd.h <= 50_000_000 {
-                        let ox = (rd.w as i32 - ow as i32) * rd.anchor.0 / 2;
-                        let oy = (rd.h as i32 - oh as i32) * rd.anchor.1 / 2;
-                        ed.resize_canvas(rd.w, rd.h, ox, oy, rd.scale);
+                        if ed.doc.sheet.is_some() {
+                            ed.resize_sheet(rd.w, rd.h, rd.anchor, rd.scale);
+                        } else {
+                            let ox = (rd.w as i32 - ow as i32) * rd.anchor.0 / 2;
+                            let oy = (rd.h as i32 - oh as i32) * rd.anchor.1 / 2;
+                            ed.resize_canvas(rd.w, rd.h, ox, oy, rd.scale);
+                        }
                     }
                 }
             } else if close { self.ui.resize = None; }
@@ -1696,6 +1723,81 @@ impl App {
         }
     }
 
+    /// Окно «Экспорт листа»: формат, область, размер, фон, качество.
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut o) = self.ui.export.take() else { return };
+        let Some(ed) = &self.ed else { return };
+        let full = (ed.doc.w, ed.doc.h);
+        let sr = ed.doc.sheet_rect();
+        let has_sheet = ed.doc.sheet.is_some();
+        let quick = !self.sh.prefs.export_dir.is_empty();
+        let (mut save, mut save_quick, mut close) = (false, false, false);
+        let mut open = true;
+        egui::Window::new("Экспорт листа").open(&mut open).collapsible(false).resizable(false).vscroll(true)
+            .max_height(ctx.screen_rect().height() * 0.85).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_max_width((ctx.screen_rect().width() - 40.0).min(440.0));
+            ui.label(egui::RichText::new("Формат").strong());
+            ui.horizontal_wrapped(|ui| {
+                for (id, name, _, _) in crate::app::EXPORT_KINDS.iter() { if ui.selectable_label(o.kind == *id, *name).clicked() { o.kind = id; } }
+            });
+            let raster = !matches!(o.kind, "psd" | "mazok");
+            let alpha = matches!(o.kind, "png" | "webp" | "tiff" | "tga" | "gif" | "layers");
+            ui.separator();
+            if o.kind == "mazok" {
+                ui.label(egui::RichText::new("Проект сохраняется целиком: все слои, папки и поле вокруг листа").weak());
+            } else {
+                if has_sheet {
+                    ui.label(egui::RichText::new("Область").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(&mut o.sheet_only, true, format!("Только лист  {} × {}", sr.w, sr.h));
+                        ui.selectable_value(&mut o.sheet_only, false, format!("Весь холст с полем  {} × {}", full.0, full.1));
+                    });
+                }
+                let (bw, bh) = if o.sheet_only { (sr.w as f32, sr.h as f32) } else { (full.0 as f32, full.1 as f32) };
+                if raster && o.kind != "gif" {
+                    ui.label(egui::RichText::new("Размер").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        for p in [25.0, 50.0, 100.0, 200.0, 300.0] { if ui.selectable_label((o.scale - p).abs() < 0.5, format!("{p:.0} %")).clicked() { o.scale = p; } }
+                        ui.add(egui::DragValue::new(&mut o.scale).range(5.0..=800.0).suffix(" %"));
+                    });
+                    ui.label(egui::RichText::new(format!("Итог: {} × {} px", (bw * o.scale / 100.0).round().max(1.0), (bh * o.scale / 100.0).round().max(1.0))).weak());
+                }
+                if alpha {
+                    let mut transparent = !o.bg;
+                    if ui.checkbox(&mut transparent, "Прозрачный фон (без цвета фона холста)").changed() { o.bg = !transparent; }
+                } else if o.kind != "psd" {
+                    ui.label(egui::RichText::new("Формат без прозрачности: прозрачные места станут цветом фона").weak());
+                }
+                if matches!(o.kind, "jpeg" | "pdf") {
+                    ui.add(egui::Slider::new(&mut o.quality, 10..=100).text("Качество"));
+                }
+                if o.kind == "pdf" {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Разрешение");
+                        for d in [72.0, 150.0, 300.0, 600.0] { ui.selectable_value(&mut o.dpi, d, format!("{d:.0} dpi")); }
+                    });
+                    let k = o.scale / 100.0 / o.dpi * 25.4;
+                    ui.label(egui::RichText::new(format!("Страница: {:.0} × {:.0} мм", bw * k, bh * k)).weak());
+                }
+                if o.kind == "psd" { ui.label(egui::RichText::new("PSD — со слоями, папками и режимами наложения, в полном размере").weak()); }
+            }
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Отмена").clicked() { close = true; }
+                if ui.add(egui::Button::new(egui::RichText::new("Сохранить как…").color(Color32::WHITE)).fill(ACCENT)).clicked() { save = true; }
+                if quick && ui.button("В папку для экспорта").on_hover_text(crate::platform::folder_label(&self.sh.prefs.export_dir)).clicked() { save_quick = true; }
+            });
+        });
+        if save || save_quick {
+            if save_quick { let q = self.sh.prefs.quick_export; self.sh.prefs.quick_export = true; self.export_with(&o, false); self.sh.prefs.quick_export = q; } else { self.export_with(&o, true); }
+            self.ui.last_export = Some(o);
+        } else if open && !close {
+            self.ui.export = Some(o);
+        } else {
+            self.ui.last_export = Some(o);
+        }
+    }
+
     pub fn toast_ui(&mut self, ctx: &egui::Context) {
         if let Some((m, t)) = &self.toast {
             if self.now - t > 2.6 || m.is_empty() { self.toast = None; return; }
@@ -1714,7 +1816,7 @@ impl App {
 const HELP: &[(&str, &str)] = &[
     ("B / E / R / S", "Кисть / Ластик / Палец / Штамп"), ("G / Shift+G", "Заливка / Градиент"), ("I / M / L / W", "Пипетка / Выделение / Лассо / Волшебная палочка"),
     ("V / T / U / H / Z", "Трансформация / Текст / Фигуры / Рука / Масштаб"), ("X / D", "Поменять цвета / Чёрный и белый"), ("[ и ]", "Размер кисти"),
-    ("Ctrl+Z / Ctrl+Shift+Z", "Отменить / Повторить"), ("Ctrl+N / Ctrl+O / Ctrl+S", "Создать / Открыть / Сохранить"), ("Ctrl+T", "Свободное трансформирование"),
+    ("Ctrl+Z / Ctrl+Shift+Z", "Отменить / Повторить"), ("Ctrl+N / Ctrl+O / Ctrl+S", "Создать / Открыть / Сохранить"), ("Ctrl+Alt+Shift+W", "Экспорт листа в PNG, JPEG, WebP, PDF, PSD, TIFF и др."), ("Ctrl+T", "Свободное трансформирование"),
     ("Ctrl+J / Ctrl+E", "Дублировать слой / Объединить с нижним"), ("Ctrl+A / Ctrl+D / Ctrl+Shift+I", "Выделить всё / Снять / Инвертировать"),
     ("Пробел + перетаскивание", "Сдвиг холста"), ("Колесо мыши", "Масштаб"), ("Alt или правая кнопка", "Пипетка"), ("Ctrl+0 / Ctrl+1 / F", "Вписать / 100% / Зеркальный вид"),
     ("Ctrl+C / Ctrl+X / Ctrl+V", "Копировать / вырезать / вставить (в том числе картинки из других программ)"), ("Ctrl+Shift+S", "Сохранить как… (выбор папки)"),

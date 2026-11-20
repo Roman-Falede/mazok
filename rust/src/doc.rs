@@ -303,6 +303,9 @@ pub struct Document {
     pub strokes: u64,
     pub time: f64,
     pub guide: Guide,
+    /// Лист внутри рабочего поля: рисовать можно и вокруг него, но экспортируется только лист.
+    /// None — лист совпадает со всем холстом.
+    pub sheet: Option<Rect>,
 }
 
 impl Document {
@@ -322,6 +325,7 @@ impl Document {
             strokes: 0,
             time: 0.0,
             guide: Guide { cx: w as f32 / 2.0, cy: h as f32 / 2.0, grid_size: (w.min(h) as f32 / 12.0).round().max(8.0), ..Default::default() },
+            sheet: None,
         };
         let n = d.next_name();
         d.layers.push(Layer::new(w, h, &n));
@@ -344,6 +348,31 @@ impl Document {
     }
     pub fn full(&self) -> Rect {
         Rect::new(0, 0, self.w as i32, self.h as i32)
+    }
+    /// Прямоугольник листа (весь холст, если поля нет).
+    pub fn sheet_rect(&self) -> Rect {
+        self.sheet.and_then(|s| s.clip(self.w, self.h)).unwrap_or(self.full())
+    }
+    /// Копия документа, обрезанная по листу (для экспорта). Без поля — та же картинка без копирования пикселей.
+    pub fn cropped_to_sheet(&self) -> Document {
+        let r = self.sheet_rect();
+        let same = r == self.full();
+        let crop = |img: &Arc<Img>| if same { img.clone() } else { Arc::new(img.crop(r)) };
+        let layers = self.layers.iter().map(|l| {
+            let mut n = l.clone();
+            if !l.group { n.img = crop(&l.img); }
+            n.mask = l.mask.as_ref().map(|m| crop(m));
+            if let (Some(v), false) = (&l.vector, same) {
+                let t = crate::raster::Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: -r.x as f32, f: -r.y as f32 };
+                n.vector = Some(Arc::new(crate::vector::transform(v, t)));
+            }
+            n
+        }).collect();
+        Document {
+            id: self.id.clone(), name: self.name.clone(), w: r.w as usize, h: r.h as usize, bg: self.bg, bg_visible: self.bg_visible, layers, active: self.active,
+            layer_seq: self.layer_seq, created: self.created, modified: self.modified, strokes: self.strokes, time: self.time,
+            guide: Guide { cx: self.guide.cx - r.x as f32, cy: self.guide.cy - r.y as f32, ..self.guide.clone() }, sheet: None,
+        }
     }
     /// Предел числа слоёв по памяти.
     pub fn max_layers(&self) -> usize {
@@ -540,7 +569,7 @@ pub fn flatten_export(doc: &Document, with_bg: bool) -> Img {
 
 /// Сведение части слоёв (индексы в порядке снизу вверх) в одно изображение.
 pub fn flatten_some(doc: &Document, idx: &[usize]) -> Img {
-    let mut d = Document { id: String::new(), name: String::new(), w: doc.w, h: doc.h, bg: doc.bg, bg_visible: false, layers: vec![], active: 0, layer_seq: 1, created: 0, modified: 0, strokes: 0, time: 0.0, guide: doc.guide.clone() };
+    let mut d = Document { id: String::new(), name: String::new(), w: doc.w, h: doc.h, bg: doc.bg, bg_visible: false, layers: vec![], active: 0, layer_seq: 1, created: 0, modified: 0, strokes: 0, time: 0.0, guide: doc.guide.clone(), sheet: None };
     let keep: std::collections::HashSet<usize> = idx.iter().copied().collect();
     // папки, в которых лежат выбранные слои, сохраняем — от них зависят режимы и видимость
     for (i, l) in doc.layers.iter().enumerate() {
@@ -567,7 +596,7 @@ pub enum Op {
     Insert { index: usize, layer: Option<Layer>, prev_active: usize },
     Remove { index: usize, layer: Option<Layer>, prev_active: usize },
     Move { from: usize, to: usize },
-    Layers { other: Vec<Layer>, w: usize, h: usize, active: usize },
+    Layers { other: Vec<Layer>, w: usize, h: usize, active: usize, sheet: Option<Rect> },
     Sel { other: Option<Vec<u8>> },
     Bg { other: ([u8; 3], bool) },
     Group(Vec<Op>),
@@ -744,8 +773,9 @@ fn apply(op: &mut Op, doc: &mut Document, sel: &mut Option<Vec<u8>>, undo: bool)
                 doc.active = b;
             }
         }
-        Op::Layers { other, w, h, active } => {
+        Op::Layers { other, w, h, active, sheet } => {
             std::mem::swap(&mut doc.layers, other);
+            std::mem::swap(&mut doc.sheet, sheet);
             std::mem::swap(&mut doc.w, w);
             std::mem::swap(&mut doc.h, h);
             std::mem::swap(&mut doc.active, active);

@@ -1,6 +1,6 @@
 [package]
 name = "mazok"
-version = "3.3.1"
+version = "3.4.0"
 edition = "2021"
 description = "Мазок — приложение для цифрового рисования (Rust)"
 license = "MIT"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 egui = "0.31"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "tga"] }
 gif = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

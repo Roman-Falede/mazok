@@ -265,6 +265,14 @@ impl AutoTest {
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("12-light.png"));
         s.push_back(run(Box::new(|a, _| { a.sh.prefs.light = false; })));
+        // лист с полем вокруг: рисунок за краем листа не экспортируется
+        s.push_back(run(Box::new(|a, l| sheet_test(a, l))));
+        s.push_back(Step::Wait(8));
+        s.push_back(Step::Shot("19-sheet-margin.png"));
+        s.push_back(run(Box::new(|a, _| { a.ui.export = Some(crate::app::ExportOpts { kind: "pdf", ..Default::default() }); })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("20-export-dialog.png"));
+        s.push_back(run(Box::new(|a, _| { a.ui.export = None; })));
         // ширина телефона: интерфейс как в Procreate не должен наезжать сам на себя
         s.push_back(Step::Size(412.0, 800.0));
         s.push_back(Step::Wait(12));
@@ -773,4 +781,63 @@ fn thick_at(ed: &crate::editor::Editor, x: f32, y: f32) -> i32 {
         if img.px[img.idx(cx as usize, yy as usize) + 3] > 60 { n += 1; }
     }
     n
+}
+
+/// Лист с полем: экспорт только листа, все форматы через настоящий экспорт в папку, сохранение, поворот, удаление поля.
+fn sheet_test(a: &mut App, l: &mut AutoLog) {
+    a.create_doc_margin("Лист с полем", 800, 600, [255, 255, 255], true, 0.25);
+    let ed = a.ed.as_mut().unwrap();
+    l.check(ed.doc.w == 1200 && ed.doc.h == 900 && ed.doc.sheet == Some(crate::util::Rect::new(200, 150, 800, 600)), format!("новый холст: лист 800×600 и поле вокруг (холст {}×{})", ed.doc.w, ed.doc.h));
+    // красный квадрат наполовину за краем листа
+    fill_rect(ed, 50, 50, 300, 300, [220, 30, 30]);
+    let cut = ed.doc.cropped_to_sheet();
+    let flat = doc::flatten_export(&cut, true);
+    let p = |img: &Img, x: usize, y: usize| { let i = img.idx(x, y); [img.px[i], img.px[i + 1], img.px[i + 2]] };
+    l.check(flat.w == 800 && flat.h == 600 && p(&flat, 0, 0) == [220, 30, 30] && p(&flat, 99, 149) == [220, 30, 30] && p(&flat, 101, 151) == [255, 255, 255],
+        format!("экспорт — только лист {}×{}: часть за краем отрезана", flat.w, flat.h));
+    // все форматы через настоящий экспорт в папку
+    let dir = std::env::var_os("MAZOK_AUTOTEST").map(PathBuf::from).unwrap_or_default().join("export");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let (old_dir, old_q) = (a.sh.prefs.export_dir.clone(), a.sh.prefs.quick_export);
+    a.sh.prefs.export_dir = dir.to_string_lossy().to_string();
+    a.sh.prefs.quick_export = true;
+    for kind in ["png", "jpeg", "webp", "pdf", "psd", "tiff", "bmp", "tga", "gif", "layers", "mazok"] {
+        let o = crate::app::ExportOpts { kind: crate::app::EXPORT_KINDS.iter().find(|k| k.0 == kind).unwrap().0, scale: if kind == "webp" { 50.0 } else { 100.0 }, bg: kind != "png", ..Default::default() };
+        a.export_with(&o, false);
+    }
+    a.export_with(&crate::app::ExportOpts { kind: "png", sheet_only: false, ..Default::default() }, false);
+    a.sh.prefs.export_dir = old_dir;
+    a.sh.prefs.quick_export = old_q;
+    let files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir).map(|rd| rd.flatten().filter_map(|e| Some((e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).ok()?))).collect()).unwrap_or_default();
+    let dims = |ext: &str| files.iter().filter(|f| f.0.to_lowercase().ends_with(ext)).filter_map(|f| formats::decode_image(&f.1).ok().map(|i| (i.w, i.h))).collect::<Vec<_>>();
+    l.check(files.len() == 12, format!("экспорт в папку: файлов {} из 12", files.len()));
+    // GIF читаем по заголовку (декодера GIF в сборке нет — он и не нужен)
+    let gif = files.iter().find(|f| f.0.ends_with(".gif")).map(|f| f.1.clone()).unwrap_or_default();
+    let gdim = if gif.len() > 10 && gif.starts_with(b"GIF89a") { Some((u16::from_le_bytes([gif[6], gif[7]]), u16::from_le_bytes([gif[8], gif[9]]))) } else { None };
+    l.check(gdim == Some((720, 540)), format!(".gif: размер {gdim:?}"));
+    for (ext, want) in [(".jpg", (800, 600)), (".webp", (400, 300)), (".tif", (800, 600)), (".bmp", (800, 600)), (".tga", (800, 600))] {
+        l.check(dims(ext) == vec![want], format!("{ext}: размер {:?}", dims(ext)));
+    }
+    let pngs = dims(".png");
+    l.check(pngs.contains(&(800, 600)) && pngs.contains(&(1200, 900)), format!("PNG: только лист и весь холст с полем {pngs:?}"));
+    let png_alpha = files.iter().find(|f| f.0.ends_with(".png") && formats::decode_image(&f.1).map_or(false, |i| i.w == 800)).and_then(|f| formats::decode_image(&f.1).ok()).map(|i| i.px[i.idx(500, 400) + 3]);
+    l.check(png_alpha == Some(0), "PNG с прозрачным фоном");
+    let pdf = files.iter().find(|f| f.0.ends_with(".pdf")).map(|f| f.1.clone()).unwrap_or_default();
+    l.check(pdf.starts_with(b"%PDF") && String::from_utf8_lossy(&pdf).contains("/MediaBox [0 0 192.000 144.000]"), "PDF: страница по листу при 300 dpi");
+    let psd = files.iter().find(|f| f.0.ends_with(".psd")).and_then(|f| formats::import(&f.1, "x.psd").ok());
+    l.check(psd.map_or(false, |d| d.w == 800 && d.h == 600), "PSD — размер листа");
+    let mz = files.iter().find(|f| f.0.ends_with(".mazok")).and_then(|f| formats::load_mazok(&f.1).ok());
+    let ok = mz.as_ref().map_or(false, |d| d.w == 1200 && d.sheet == Some(crate::util::Rect::new(200, 150, 800, 600)) && { let i = d.layers[0].img.idx(60, 60); d.layers[0].img.px[i] == 220 });
+    l.check(ok, ".mazok хранит поле и рисунок за краем листа");
+    // поворот холста поворачивает и лист; удаление поля обрезает по листу
+    let ed = a.ed.as_mut().unwrap();
+    ed.rotate_canvas(true);
+    l.check(ed.doc.sheet == Some(crate::util::Rect::new(150, 200, 600, 800)), format!("поворот холста: лист {:?}", ed.doc.sheet));
+    ed.undo();
+    ed.set_sheet_margin(0.0);
+    let ok = ed.doc.w == 800 && ed.doc.h == 600 && ed.doc.sheet.is_none() && ed.doc.layer().img.px[3] == 255;
+    ed.undo();
+    l.check(ok && ed.doc.w == 1200 && ed.doc.sheet.is_some(), "поле убирается (обрезка по листу) и возвращается отменой");
+    ed.fit();
 }

@@ -132,6 +132,11 @@ pub fn png(img: &Img) -> Vec<u8> {
 }
 
 pub fn jpeg(img: &Img, bg: [u8; 3]) -> Vec<u8> {
+    jpeg_q(img, bg, 92)
+}
+
+/// JPEG с заданным качеством (1…100) поверх цвета bg.
+pub fn jpeg_q(img: &Img, bg: [u8; 3], quality: u8) -> Vec<u8> {
     use image::codecs::jpeg::JpegEncoder;
     let mut rgb = Vec::with_capacity(img.w * img.h * 3);
     for p in img.px.chunks_exact(4) {
@@ -141,13 +146,17 @@ pub fn jpeg(img: &Img, bg: [u8; 3]) -> Vec<u8> {
         }
     }
     let mut out = Vec::new();
-    let mut enc = JpegEncoder::new_with_quality(&mut out, 92);
+    let mut enc = JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100));
     let _ = enc.encode(&rgb, img.w as u32, img.h as u32, image::ExtendedColorType::Rgb8);
     out
 }
 
 pub fn decode_image(bytes: &[u8]) -> Result<Img, String> {
-    let im = image::load_from_memory(bytes).map_err(|e| format!("Не удалось открыть изображение: {e}"))?.to_rgba8();
+    // у TGA нет сигнатуры — пробуем его, если формат не распознан
+    let im = image::load_from_memory(bytes)
+        .or_else(|e| image::load_from_memory_with_format(bytes, image::ImageFormat::Tga).map_err(|_| e))
+        .map_err(|e| format!("Не удалось открыть изображение: {e}"))?
+        .to_rgba8();
     let (w, h) = im.dimensions();
     Ok(Img::from_straight(w as usize, h as usize, im.as_raw()))
 }
@@ -204,6 +213,8 @@ pub struct DocMeta {
     pub format: String,
     pub version: u32,
     pub guide_rs: Option<Guide>,
+    /// Лист внутри рабочего поля [x, y, ширина, высота].
+    pub sheet: Option<[i32; 4]>,
 }
 
 pub fn meta(doc: &Document) -> DocMeta {
@@ -242,6 +253,7 @@ pub fn meta(doc: &Document) -> DocMeta {
         format: "mazok".into(),
         version: 1,
         guide_rs: Some(doc.guide.clone()),
+        sheet: doc.sheet.map(|s| [s.x, s.y, s.w, s.h]),
     }
 }
 
@@ -281,6 +293,7 @@ pub fn load_mazok(bytes: &[u8]) -> Result<Document, String> {
     if let Some(g) = m.guide_rs {
         d.guide = g;
     }
+    d.sheet = m.sheet.map(|s| crate::util::Rect::new(s[0], s[1], s[2], s[3])).and_then(|r| r.clip(m.w, m.h)).filter(|r| r.w > 0 && r.h > 0 && (r.w as usize, r.h as usize) != (m.w, m.h));
     for lm in &m.layers {
         let mut l = Layer::new(m.w, m.h, &lm.name);
         if !lm.id.is_empty() {
@@ -724,3 +737,79 @@ pub fn import(bytes: &[u8], file_name: &str) -> Result<Document, String> {
 }
 
 pub fn _unused(_: &Cursor<Vec<u8>>) {}
+
+/* ---------- экспорт в разные форматы ---------- */
+
+/// Кодировать картинку: png, webp (без потерь), bmp, tiff, tga. Прозрачность сохраняется.
+pub fn encode(img: &Img, kind: &str) -> Result<Vec<u8>, String> {
+    let fmt = match kind {
+        "png" => return Ok(png(img)),
+        "webp" => image::ImageFormat::WebP,
+        "bmp" => image::ImageFormat::Bmp,
+        "tiff" => image::ImageFormat::Tiff,
+        "tga" => image::ImageFormat::Tga,
+        _ => return Err(format!("Неизвестный формат {kind}")),
+    };
+    let rgba = image::RgbaImage::from_raw(img.w as u32, img.h as u32, img.to_straight()).ok_or("Пустое изображение")?;
+    let mut out = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba).write_to(&mut out, fmt).map_err(|e| format!("Не удалось сохранить: {e}"))?;
+    Ok(out.into_inner())
+}
+
+/// PDF на одну страницу: изображение JPEG, размер страницы по разрешению dpi.
+pub fn pdf(img: &Img, bg: [u8; 3], quality: u8, dpi: f32) -> Vec<u8> {
+    let jpg = jpeg_q(img, bg, quality);
+    let dpi = dpi.clamp(36.0, 1200.0);
+    let (wpt, hpt) = (img.w as f32 * 72.0 / dpi, img.h as f32 * 72.0 / dpi);
+    let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offs = vec![];
+    let obj = |out: &mut Vec<u8>, offs: &mut Vec<usize>, head: String, stream: Option<&[u8]>| {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", offs.len()).as_bytes());
+        out.extend_from_slice(head.as_bytes());
+        if let Some(s) = stream {
+            out.extend_from_slice(b"\nstream\n");
+            out.extend_from_slice(s);
+            out.extend_from_slice(b"\nendstream");
+        }
+        out.extend_from_slice(b"\nendobj\n");
+    };
+    let content = format!("q {wpt:.3} 0 0 {hpt:.3} 0 0 cm /Im0 Do Q");
+    obj(&mut out, &mut offs, "<< /Type /Catalog /Pages 2 0 R >>".into(), None);
+    obj(&mut out, &mut offs, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None);
+    obj(&mut out, &mut offs, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {wpt:.3} {hpt:.3}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"), None);
+    obj(&mut out, &mut offs, format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>", img.w, img.h, jpg.len()), Some(&jpg));
+    obj(&mut out, &mut offs, format!("<< /Length {} >>", content.len()), Some(content.as_bytes()));
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offs.len() + 1).as_bytes());
+    for o in &offs { out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes()); }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes());
+    out
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn raster_formats_roundtrip() {
+        let mut img = Img::new(40, 30);
+        for y in 0..30 { for x in 0..40 { let i = img.idx(x, y); if x < 20 { img.px[i..i + 4].copy_from_slice(&[200, 30, 30, 255]); } } }
+        for k in ["png", "webp", "bmp", "tiff", "tga"] {
+            let b = encode(&img, k).unwrap_or_else(|e| panic!("{k}: {e}"));
+            let back = decode_image(&b).unwrap_or_else(|e| panic!("{k}: {e}"));
+            assert_eq!((back.w, back.h), (40, 30), "{k}");
+            let (l, r) = (&back.px[back.idx(5, 5)..back.idx(5, 5) + 4], &back.px[back.idx(30, 5) + 3]);
+            assert!(l[0] > 190 && l[3] == 255 && *r == 0, "{k}: {l:?} / {r}");
+        }
+        let p = pdf(&img, [255, 255, 255], 90, 300.0);
+        let s = String::from_utf8_lossy(&p);
+        assert!(p.starts_with(b"%PDF-1.4") && s.contains("/DCTDecode") && s.trim_end().ends_with("%%EOF"));
+        let xref: usize = s.split("startxref\n").nth(1).unwrap().lines().next().unwrap().parse().unwrap();
+        assert!(p[xref..].starts_with(b"xref"), "смещение xref указывает на таблицу");
+        // смещения объектов в таблице xref указывают на их начало
+        let tab = &s[s.rfind("xref
+").unwrap()..];
+        for line in tab.lines().skip(3).take(5) { let o: usize = line[..10].parse().unwrap(); assert!(p[o..].starts_with(b"1 0 obj") || p[o..o + 8].windows(3).any(|w| w == b"obj")); }
+    }
+}

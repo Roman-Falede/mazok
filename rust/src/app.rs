@@ -29,8 +29,8 @@ pub enum Purpose { Import, InsertImage, Brushes, Palette, TipImage, GrainImage }
 impl Purpose {
     fn spec(self) -> (&'static str, &'static str, &'static [&'static str], bool) {
         match self {
-            Purpose::Import => ("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "psd", "mazok", "zip"], true),
-            Purpose::InsertImage => ("Вставить изображение", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp", "gif"], true),
+            Purpose::Import => ("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff", "tga", "psd", "mazok", "zip"], true),
+            Purpose::InsertImage => ("Вставить изображение", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff", "tga"], true),
             Purpose::Brushes => ("Импорт кистей", "Кисти Photoshop и Clip Studio", &["abr", "sut"], true),
             Purpose::Palette => ("Импорт палитры", "Палитры", &crate::palette::EXTS, true),
             Purpose::TipImage => ("Форма отпечатка из картинки", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp"], false),
@@ -77,7 +77,7 @@ pub struct App {
 pub fn snapshot(d: &Document) -> Document {
     Document {
         id: d.id.clone(), name: d.name.clone(), w: d.w, h: d.h, bg: d.bg, bg_visible: d.bg_visible, layers: d.layers.clone(), active: d.active,
-        layer_seq: d.layer_seq, created: d.created, modified: d.modified, strokes: d.strokes, time: d.time, guide: d.guide.clone(),
+        layer_seq: d.layer_seq, created: d.created, modified: d.modified, strokes: d.strokes, time: d.time, guide: d.guide.clone(), sheet: d.sheet,
     }
 }
 
@@ -87,9 +87,10 @@ pub fn write_doc(dir: &Path, d: &Document) -> Result<(), String> {
     let tmp = dir.join(format!("{}.tmp", d.id));
     std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, dir.join(format!("{}.mazok", d.id))).map_err(|e| e.to_string())?;
-    let item = GalleryItem { id: d.id.clone(), name: d.name.clone(), w: d.w, h: d.h, modified: d.modified };
+    let sr = d.sheet_rect();
+    let item = GalleryItem { id: d.id.clone(), name: d.name.clone(), w: sr.w as usize, h: sr.h as usize, modified: d.modified };
     let _ = std::fs::write(dir.join(format!("{}.json", d.id)), serde_json::to_vec(&item).unwrap_or_default());
-    let thumb = doc::flatten(d, true);
+    let thumb = doc::flatten(d, true).crop(d.sheet_rect());
     let mut t = thumb.thumbnail(360);
     if !d.bg_visible {
         let mut bg = Img::filled(t.w, t.h, [255, 255, 255, 255]);
@@ -202,7 +203,16 @@ impl App {
     }
 
     pub fn create_doc(&mut self, name: &str, w: usize, h: usize, bg: [u8; 3], bg_visible: bool) {
-        let d = Document::new(name, w, h, bg, bg_visible);
+        self.create_doc_margin(name, w, h, bg, bg_visible, 0.0);
+    }
+
+    /// Новый холст: лист w×h и поле для рисования вокруг него (margin — доля листа с каждой стороны).
+    pub fn create_doc_margin(&mut self, name: &str, w: usize, h: usize, bg: [u8; 3], bg_visible: bool, margin: f32) {
+        let (mx, my) = ((w as f32 * margin).round() as usize, (h as f32 * margin).round() as usize);
+        let mut d = Document::new(name, w + 2 * mx, h + 2 * my, bg, bg_visible);
+        if mx > 0 || my > 0 {
+            d.sheet = Some(util::Rect::new(mx as i32, my as i32, w as i32, h as i32));
+        }
         if let Err(e) = write_doc(&self.docs_dir, &d) {
             self.toast(format!("Ошибка: {e}"));
         }
@@ -530,35 +540,54 @@ impl App {
 
     /* ---------- экспорт ---------- */
 
-    /// Экспорт; ask — всегда спрашивать место («Сохранить как»).
+    /// Экспорт с настройками по умолчанию; ask — всегда спрашивать место («Сохранить как»).
     pub fn export_as(&mut self, kind: &str, ask: bool) {
+        let o = ExportOpts { kind: EXPORT_KINDS.iter().find(|k| k.0 == kind).map_or("png", |k| k.0), ..ExportOpts::default() };
+        self.export_with(&o, ask);
+    }
+
+    /// Экспорт листа (или всего холста с полем) в выбранный формат.
+    pub fn export_with(&mut self, o: &ExportOpts, ask: bool) {
         let Some(ed) = &mut self.ed else { return };
         ed.commit_pending();
-        let d = &ed.doc;
+        let full = &ed.doc;
+        // по умолчанию — только лист: нарисованное на поле вокруг него в файл не попадает
+        let d = if o.sheet_only { full.cropped_to_sheet() } else { snapshot(full) };
         let base = safe_name(&d.name);
-        let out: Result<(String, &str, Vec<u8>), String> = match kind {
-            "png" => Ok((format!("{base}.png"), "image/png", formats::png(&doc::flatten_export(d, true)))),
-            "jpeg" => Ok((format!("{base}.jpg"), "image/jpeg", formats::jpeg(&doc::flatten_export(d, true), [255, 255, 255]))),
-            "psd" => Ok((format!("{base}.psd"), "image/vnd.adobe.photoshop", formats::psd_write(d))),
-            "mazok" => Ok((format!("{base}.mazok"), "application/zip", formats::save_mazok(d))),
+        let k = (o.scale / 100.0).clamp(0.05, 8.0);
+        let scaled = |img: Img| -> Img {
+            if (k - 1.0).abs() < 1e-3 { img } else { img.resize(((img.w as f32 * k).round() as usize).max(1), ((img.h as f32 * k).round() as usize).max(1)) }
+        };
+        let flat = || scaled(doc::flatten_export(&d, o.bg));
+        let paper = if d.bg_visible && o.bg { d.bg } else { [255, 255, 255] };
+        let (ext, mime) = EXPORT_KINDS.iter().find(|x| x.0 == o.kind).map_or(("png", "image/png"), |x| (x.2, x.3));
+        let name = format!("{base}.{ext}");
+        let out: Result<Vec<u8>, String> = match o.kind {
+            "png" | "webp" | "bmp" | "tiff" | "tga" => formats::encode(&flat(), o.kind),
+            "jpeg" => Ok(formats::jpeg_q(&flat(), paper, o.quality)),
+            "pdf" => Ok(formats::pdf(&flat(), paper, o.quality, o.dpi)),
+            "psd" => Ok(formats::psd_write(&d)),
+            "mazok" => Ok(formats::save_mazok(full)),
             "layers" => {
-                let files: Vec<(String, Vec<u8>)> = d.layers.iter().filter(|l| !l.group).enumerate().map(|(i, l)| (format!("{:02} {}.png", i + 1, safe_name(&l.name)), formats::png(&l.baked()))).collect();
-                Ok((format!("{base} — слои.zip"), "application/zip", formats::zip_write(&files)))
+                let files: Vec<(String, Vec<u8>)> = d.layers.iter().filter(|l| !l.group).enumerate().map(|(i, l)| (format!("{:02} {}.png", i + 1, safe_name(&l.name)), formats::png(&scaled(l.baked())))).collect();
+                Ok(formats::zip_write(&files))
             }
             "gif" => {
-                let k = (720.0 / d.w.max(d.h) as f32).min(1.0);
-                let (w, h) = (((d.w as f32 * k) as usize).max(1), ((d.h as f32 * k) as usize).max(1));
+                // 100 % — как раньше, не больше 720 точек; иначе — выбранный масштаб
+                let kk = if (k - 1.0).abs() < 1e-3 { (720.0 / d.w.max(d.h) as f32).min(1.0) } else { k };
+                let (w, h) = (((d.w as f32 * kk) as usize).clamp(1, 4096), ((d.h as f32 * kk) as usize).clamp(1, 4096));
                 let frames: Vec<Img> = d.layers.iter().filter(|l| !l.group && !l.draft).map(|l| {
-                    let mut f = if d.bg_visible { Img::filled(d.w, d.h, [d.bg[0], d.bg[1], d.bg[2], 255]) } else { Img::new(d.w, d.h) };
+                    let mut f = if d.bg_visible && o.bg { Img::filled(d.w, d.h, [d.bg[0], d.bg[1], d.bg[2], 255]) } else { Img::new(d.w, d.h) };
                     if l.visible { f.draw_over(0, 0, &l.baked(), l.opacity); }
                     f.resize(w, h)
                 }).collect();
-                formats::gif(&frames, 12).map(|b| (format!("{base}.gif"), "image/gif", b))
+                if frames.is_empty() { Err("Нет слоёв для кадров".into()) } else { formats::gif(&frames, 12) }
             }
             _ => Err(String::new()),
         };
+        let name = if o.kind == "layers" { format!("{base} — слои.zip") } else { name };
         match out {
-            Ok((name, mime, bytes)) => self.save_file(&name, mime, bytes, ask),
+            Ok(bytes) => self.save_file(&name, mime, bytes, ask),
             Err(e) => self.save_result(Err(e)),
         }
     }
@@ -583,6 +612,7 @@ impl App {
             "gallery" => self.to_gallery(),
             "insert_image" => self.insert_image(),
             "save_as" => self.export_as("mazok", true),
+            "export_dialog" => { let o = self.ui.last_export.clone().unwrap_or_default(); self.ui.export = Some(o); }
             "quick_png" => self.export_as("png", false),
             "import_brushes" => self.request_open(Purpose::Brushes),
             "import_palette" => self.request_open(Purpose::Palette),
@@ -824,4 +854,39 @@ fn setup_fonts(ctx: &egui::Context) {
     defs.font_data.insert("system-ui".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     if let Some(f) = defs.families.get_mut(&egui::FontFamily::Proportional) { f.insert(0, "system-ui".into()); }
     ctx.set_fonts(defs);
+}
+
+/// Форматы экспорта: (id, название, расширение, MIME).
+pub const EXPORT_KINDS: [(&str, &str, &str, &str); 11] = [
+    ("png", "PNG", "png", "image/png"),
+    ("jpeg", "JPEG", "jpg", "image/jpeg"),
+    ("webp", "WebP", "webp", "image/webp"),
+    ("pdf", "PDF", "pdf", "application/pdf"),
+    ("psd", "PSD (слои)", "psd", "image/vnd.adobe.photoshop"),
+    ("tiff", "TIFF", "tif", "image/tiff"),
+    ("bmp", "BMP", "bmp", "image/bmp"),
+    ("tga", "TGA", "tga", "image/x-tga"),
+    ("gif", "GIF (кадры)", "gif", "image/gif"),
+    ("layers", "Слои PNG (ZIP)", "zip", "application/zip"),
+    ("mazok", "Проект .mazok", "mazok", "application/zip"),
+];
+
+/// Настройки экспорта.
+#[derive(Clone, Debug)]
+pub struct ExportOpts {
+    pub kind: &'static str,
+    /// Только лист (иначе весь холст вместе с полем вокруг листа).
+    pub sheet_only: bool,
+    /// Масштаб в процентах.
+    pub scale: f32,
+    /// С фоном (иначе прозрачный, если формат умеет).
+    pub bg: bool,
+    pub quality: u8,
+    pub dpi: f32,
+}
+
+impl Default for ExportOpts {
+    fn default() -> Self {
+        ExportOpts { kind: "png", sheet_only: true, scale: 100.0, bg: true, quality: 92, dpi: 300.0 }
+    }
 }

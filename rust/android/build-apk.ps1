@@ -4,8 +4,8 @@
 param(
   [string]$Sdk = $env:ANDROID_HOME,
   [string]$Ndk = '',
-  [string]$VersionName = '3.3.1',
-  [int]$VersionCode = 7,
+  [string]$VersionName = '3.4.0',
+  [int]$VersionCode = 8,
   [switch]$SkipCargo
 )
 $ErrorActionPreference = 'Stop'

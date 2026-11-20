@@ -218,7 +218,7 @@ fn actions_pop(ui: &mut Ui, cx: &mut Cx, h: f32) {
             3 => layer_menu(ui, cx),
             4 => select_menu(ui, cx),
             5 => {
-                for (k, n) in [("save", "Сохранить  (Ctrl+S)"), ("save_as", "Сохранить как… (выбрать папку)"), ("quick_png", "Быстрый экспорт PNG"), ("export_png", "PNG"), ("export_jpeg", "JPEG"), ("export_psd", "PSD со слоями и папками"), ("export_mazok", "Проект Мазок (.mazok)"), ("export_layers", "Слои в PNG (ZIP)"), ("export_gif", "GIF (слои — кадры)"), ("pick_export_dir", "Папка для сохранения…"), ("import_brushes", "Импорт кистей (.abr, .sut)…"), ("import_palette", "Импорт палитры…")] {
+                for (k, n) in [("export_dialog", "Экспорт листа… (PNG, JPEG, WebP, PDF, PSD, TIFF…)"), ("save", "Сохранить  (Ctrl+S)"), ("save_as", "Сохранить как… (выбрать папку)"), ("quick_png", "Быстрый экспорт PNG"), ("export_png", "PNG"), ("export_jpeg", "JPEG"), ("export_psd", "PSD со слоями и папками"), ("export_mazok", "Проект Мазок (.mazok)"), ("export_layers", "Слои в PNG (ZIP)"), ("export_gif", "GIF (слои — кадры)"), ("pick_export_dir", "Папка для сохранения…"), ("import_brushes", "Импорт кистей (.abr, .sut)…"), ("import_palette", "Импорт палитры…")] {
                     if big_button(ui, n).clicked() { cx.acts.push(k); cx.st.pop = None; }
                 }
             }

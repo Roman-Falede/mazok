@@ -88,6 +88,14 @@ impl View {
         self.ox += p.x - q.x;
         self.oy += p.y - q.y;
     }
+    /// Вписать прямоугольник документа (лист) в область экрана.
+    pub fn fit_rect(&mut self, r: Rect, area: egui::Rect) {
+        self.s = (area.width() / r.w.max(1) as f32).min(area.height() / r.h.max(1) as f32) * 0.92;
+        self.r = 0.0;
+        self.flip = 1.0;
+        self.ox = area.center().x - self.s * (r.x as f32 + r.w as f32 / 2.0);
+        self.oy = area.center().y - self.s * (r.y as f32 + r.h as f32 / 2.0);
+    }
     pub fn fit(&mut self, w: usize, h: usize, area: egui::Rect) {
         self.s = (area.width() / w as f32).min(area.height() / h as f32) * 0.92;
         self.r = 0.0;
@@ -554,7 +562,8 @@ impl Editor {
     }
     pub fn fit(&mut self) {
         if self.canvas_rect.is_positive() {
-            self.view.fit(self.doc.w, self.doc.h, self.canvas_rect.shrink(12.0));
+            let r = self.doc.sheet_rect();
+            self.view.fit_rect(r, self.canvas_rect.shrink(12.0));
         } else {
             self.fitted = false;
         }
@@ -616,7 +625,7 @@ impl Editor {
         let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.canvas_rect = rect;
         if !self.fitted && rect.is_positive() {
-            self.view.fit(self.doc.w, self.doc.h, rect.shrink(12.0));
+            self.view.fit_rect(self.doc.sheet_rect(), rect.shrink(12.0));
             self.fitted = true;
         }
         self.handle_input(ui, rect, sh);
@@ -656,6 +665,20 @@ impl Editor {
             if self.xform.is_none() {
                 quad(&painter, t.id(), corners, [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)]);
             }
+        }
+        if let Some(s) = self.doc.sheet.and_then(|s| s.clip(self.doc.w, self.doc.h)) {
+            // поле вокруг листа: рисунок там виден, но приглушён и не экспортируется
+            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+            let (x0, y0, x1, y1) = (s.x as f32, s.y as f32, s.right() as f32, s.bottom() as f32);
+            let dim = if sh.prefs.light { Color32::from_black_alpha(70) } else { Color32::from_black_alpha(125) };
+            for (a, b, c, d) in [(0.0, 0.0, w, y0), (0.0, y1, w, h), (0.0, y0, x0, y1), (x1, y0, w, y1)] {
+                if c - a <= 0.0 || d - b <= 0.0 { continue; }
+                let pts = vec![self.view.to_screen(a, b), self.view.to_screen(c, b), self.view.to_screen(c, d), self.view.to_screen(a, d)];
+                painter.add(egui::Shape::convex_polygon(pts, dim, egui::Stroke::NONE));
+            }
+            let rim: Vec<Pos2> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].iter().map(|&(x, y)| self.view.to_screen(x, y)).collect();
+            painter.add(egui::Shape::closed_line(rim.clone(), egui::Stroke::new(2.0, Color32::from_black_alpha(140))));
+            painter.add(egui::Shape::closed_line(rim, egui::Stroke::new(1.0, Color32::from_white_alpha(170))));
         }
         self.draw_guides(&painter);
         self.draw_overlay(&painter, sh);
@@ -2801,13 +2824,14 @@ impl Editor {
             Ok(())
         });
     }
-    fn replace_layers(&mut self, layers: Vec<Layer>, w: usize, h: usize, name: &str) {
+    fn replace_layers(&mut self, layers: Vec<Layer>, w: usize, h: usize, sheet: Option<Rect>, name: &str) {
         let old = std::mem::replace(&mut self.doc.layers, layers);
-        let (ow, oh, oa) = (self.doc.w, self.doc.h, self.doc.active);
+        let (ow, oh, oa, os) = (self.doc.w, self.doc.h, self.doc.active, self.doc.sheet);
         self.doc.w = w;
         self.doc.h = h;
+        self.doc.sheet = sheet;
         self.doc.active = self.doc.active.min(self.doc.layers.len() - 1);
-        self.hist.push(name, Op::Layers { other: old, w: ow, h: oh, active: oa });
+        self.hist.push(name, Op::Layers { other: old, w: ow, h: oh, active: oa, sheet: os });
         if self.sel.as_ref().map_or(false, |m| m.len() != w * h) { self.sel = None; self.sel_dirty = true; }
         self.after_history();
     }
@@ -2818,7 +2842,8 @@ impl Editor {
         l.img = Arc::new(doc::flatten(&self.doc, false));
         let (w, h) = (self.doc.w, self.doc.h);
         self.doc.active = 0;
-        self.replace_layers(vec![l], w, h, "Свести изображение");
+        let s = self.doc.sheet;
+        self.replace_layers(vec![l], w, h, s, "Свести изображение");
     }
     pub fn canvas_op(&mut self, name: &str, nw: usize, nh: usize, aff: Affine, f: impl Fn(&Img) -> Img) {
         self.commit_pending();
@@ -2833,7 +2858,56 @@ impl Editor {
             n.ver += 1;
             n
         }).collect();
-        self.replace_layers(layers, nw, nh, name);
+        // лист переносится тем же преобразованием
+        let sheet = self.doc.sheet.and_then(|s| {
+            let (x0, y0) = aff.apply(s.x as f32, s.y as f32);
+            let (x1, y1) = aff.apply(s.right() as f32, s.bottom() as f32);
+            Rect::from_f(x0, y0, x1, y1).clip(nw, nh)
+        });
+        self.replace_layers(layers, nw, nh, sheet, name);
+    }
+
+    /// Поле для рисования вокруг листа: pct — доля размера листа с каждой стороны (0 — убрать поле).
+    pub fn set_sheet_margin(&mut self, pct: f32) {
+        let s = self.doc.sheet_rect();
+        if pct <= 0.0 {
+            if self.doc.sheet.is_none() { return; }
+            let (ox, oy) = (-s.x, -s.y);
+            self.resize_canvas_raw(s.w as usize, s.h as usize, ox, oy, "Убрать поле вокруг листа");
+            self.doc.sheet = None;
+        } else {
+            let (mx, my) = ((s.w as f32 * pct).round() as i32, (s.h as f32 * pct).round() as i32);
+            let (nw, nh) = ((s.w + 2 * mx) as usize, (s.h + 2 * my) as usize);
+            if nw * nh > 50_000_000 { self.toast("Слишком большое поле для этого размера листа"); return; }
+            self.resize_canvas_raw(nw, nh, mx - s.x, my - s.y, "Поле вокруг листа");
+            self.doc.sheet = Some(Rect::new(mx, my, s.w, s.h));
+        }
+        self.doc.guide.cx = self.doc.sheet_rect().x as f32 + s.w as f32 / 2.0;
+        self.doc.guide.cy = self.doc.sheet_rect().y as f32 + s.h as f32 / 2.0;
+        self.invalidate_all();
+        self.fit();
+    }
+
+    fn resize_canvas_raw(&mut self, nw: usize, nh: usize, ox: i32, oy: i32, name: &str) {
+        let aff = Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: ox as f32, f: oy as f32 };
+        self.canvas_op(name, nw, nh, aff, |img| { let mut o = Img::new(nw, nh); o.put(ox, oy, img); o });
+    }
+
+    /// Изменить размер листа (поле вокруг сохраняется). anchor — привязка 0..2 по каждой оси.
+    pub fn resize_sheet(&mut self, nw: usize, nh: usize, anchor: (i32, i32), scale: bool) {
+        let s = self.doc.sheet_rect();
+        if scale {
+            let (kx, ky) = (nw as f32 / s.w as f32, nh as f32 / s.h as f32);
+            let (fw, fh) = (((self.doc.w as f32 * kx).round() as usize).max(1), ((self.doc.h as f32 * ky).round() as usize).max(1));
+            self.resize_canvas(fw, fh, 0, 0, true);
+            if let Some(sh) = self.doc.sheet.as_mut() { sh.w = nw as i32; sh.h = nh as i32; }
+        } else {
+            let (dw, dh) = (nw as i32 - s.w, nh as i32 - s.h);
+            let (fw, fh) = ((self.doc.w as i32 + dw).max(1) as usize, (self.doc.h as i32 + dh).max(1) as usize);
+            self.resize_canvas_raw(fw, fh, dw * anchor.0 / 2, dh * anchor.1 / 2, "Размер листа");
+            self.doc.sheet = Some(Rect::new(s.x, s.y, nw as i32, nh as i32));
+        }
+        self.invalidate_all();
     }
     pub fn resize_canvas(&mut self, nw: usize, nh: usize, ox: i32, oy: i32, scale: bool) {
         let (ow, oh) = (self.doc.w as f32, self.doc.h as f32);
@@ -2953,6 +3027,7 @@ impl Editor {
                 if k(Key::J) { action = Some(if shift { "cut_layer" } else { "dup_or_copy" }); }
                 if k(Key::E) { action = Some(if shift { "flatten" } else { "merge" }); }
                 if k(Key::T) { action = Some("transform"); }
+                if k(Key::W) && shift && i.modifiers.alt { action = Some("export_dialog"); }
                 if k(Key::G) { action = Some(if shift { "ungroup" } else { "group" }); }
                 if k(Key::OpenBracket) { action = Some("layer_down"); }
                 if k(Key::CloseBracket) { action = Some("layer_up"); }
