@@ -768,6 +768,14 @@ impl eframe::App for App {
         }
         self.focused = focused;
         self.poll_pending(ctx);
+        #[cfg(target_os = "android")]
+        if self.now - self.ui.safe_t > 1.0 {
+            self.ui.safe_t = self.now;
+            if let Some(px) = platform::android::insets() {
+                let k = ctx.pixels_per_point().max(0.5);
+                self.ui.safe = px.map(|v| (v.max(0) as f32 / k).min(120.0));
+            }
+        }
         self.clipboard_events(ctx);
         self.dropped_files(ctx);
         let mut action: Option<String> = None;
@@ -795,6 +803,8 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // на Android атлас шрифта не шире 4096: меньше данных при догрузке символов
+        if cfg!(target_os = "android") { raw.max_texture_side = Some(raw.max_texture_side.unwrap_or(4096).min(4096)); }
         crate::autotest::AutoTest::input(self, raw);
     }
 }

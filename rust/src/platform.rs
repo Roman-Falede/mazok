@@ -222,6 +222,19 @@ pub mod android {
         })?.ok_or_else(|| "Нет доступа к папке — выберите её заново в настройках".into())
     }
 
+    /// Системные отступы экрана в пикселях: сверху, снизу, слева, справа.
+    pub fn insets() -> Option<[i32; 4]> {
+        with(|env, a| {
+            let cls = env.get_object_class(a)?;
+            let r = env.call_static_method(cls, "insetsNow", "()[I", &[])?.l()?;
+            if r.is_null() { return Ok(None); }
+            let arr = jni::objects::JIntArray::from(r);
+            let mut v = [0i32; 4];
+            env.get_int_array_region(&arr, 0, &mut v)?;
+            Ok(Some(v))
+        }).ok().flatten()
+    }
+
     pub fn clipboard_image() -> Option<Vec<u8>> {
         with(|env, a| {
             let r = env.call_method(a, "clipboardImage", "()[B", &[])?.l()?;

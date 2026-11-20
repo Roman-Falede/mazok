@@ -90,17 +90,19 @@ fn vslider(ui: &mut Ui, v: &mut f32, lo: f32, hi: f32, size: Vec2, tip: &str) ->
     resp.on_hover_text(tip)
 }
 
-fn side_bar(ctx: &egui::Context, cx: &mut Cx, bottom_h: f32) {
+fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
     let screen = ctx.screen_rect();
     let light = cx.sh.prefs.light;
     let w = 50.0;
-    let avail = (screen.height() - BAR_H - bottom_h - 24.0).max(220.0);
+    let safe = cx.st.safe;
+    let bottom = screen.bottom() - safe[1];
+    let avail = (bottom - top - 16.0).max(220.0);
     let fixed = 34.0 + 8.0 + 2.0 * 38.0 + 30.0;
     let size_h = ((avail - fixed) * 0.56).clamp(70.0, 250.0);
     let op_h = ((avail - fixed) * 0.44).clamp(60.0, 200.0);
     let h = size_h + op_h + fixed;
-    let x = if cx.sh.prefs.sidebar_right { screen.right() - w - 8.0 } else { screen.left() + 8.0 };
-    let y = BAR_H + ((screen.height() - BAR_H - bottom_h - h) / 2.0).max(8.0);
+    let x = if cx.sh.prefs.sidebar_right { screen.right() - safe[3] - w - 8.0 } else { screen.left() + safe[2] + 8.0 };
+    let y = top + ((bottom - top - h) / 2.0).max(8.0);
     let mut bubble: Option<(f32, String, Pos2)> = None;
     egui::Area::new(egui::Id::new("studio-side")).order(egui::Order::Middle).fixed_pos(Pos2::new(x, y)).show(ctx, |ui| {
         egui::Frame::new().fill(side_bg(light)).corner_radius(14.0).inner_margin(egui::Margin::symmetric(4, 8)).show(ui, |ui| {
@@ -290,8 +292,8 @@ fn popover(ctx: &egui::Context, cx: &mut Cx) {
     let a = cx.st.pop_anchor;
     let x = if screen.width() < 560.0 { (screen.width() - w) / 2.0 } else if a.center().x > screen.center().x { a.right() - w } else { a.left() };
     let x = x.clamp(8.0, (screen.right() - w - 8.0).max(8.0));
-    let y = BAR_H + 4.0;
-    let h = (screen.bottom() - y - 40.0).min(680.0).max(200.0);
+    let y = BAR_H + cx.st.safe[0] + 4.0;
+    let h = (screen.bottom() - cx.st.safe[1] - y - 24.0).min(680.0).max(200.0);
     egui::Area::new(egui::Id::new("studio-pop")).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(ctx, |ui| {
         egui::Frame::new().fill(pop_bg(light)).corner_radius(14.0).inner_margin(12.0)
             .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(110) })
@@ -331,17 +333,18 @@ fn popover(ctx: &egui::Context, cx: &mut Cx) {
     });
 }
 
-/// Нужна ли нижняя плавающая панель параметров (выделение, трансформация, заливка и т. п.).
+/// Нужна ли плавающая панель параметров (выделение, трансформация, заливка и т. п.).
 fn needs_bottom(cx: &Cx) -> bool {
     !matches!(cx.ed.tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Picker) || cx.ed.xform.is_some() || (cx.ed.tool == Tool::Eraser && cx.ed.doc.layer().is_vector())
 }
 
-fn bottom_bar(ctx: &egui::Context, cx: &mut Cx) -> f32 {
+/// Панель параметров инструмента — сверху, под основной полосой (внизу её закрывают системные кнопки Android).
+fn tool_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) -> f32 {
     if !needs_bottom(cx) { return 0.0; }
     let screen = ctx.screen_rect();
     let light = cx.sh.prefs.light;
     let maxw = screen.width() - 24.0;
-    let r = egui::Area::new(egui::Id::new("studio-bottom")).order(egui::Order::Middle).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0]).show(ctx, |ui| {
+    let r = egui::Area::new(egui::Id::new("studio-bottom")).order(egui::Order::Middle).anchor(egui::Align2::CENTER_TOP, [0.0, top + 6.0]).show(ctx, |ui| {
         egui::Frame::new().fill(side_bg(light)).corner_radius(14.0).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.set_max_width(maxw - 20.0);
             egui::ScrollArea::horizontal().id_salt("sbot").show(ui, |ui| {
@@ -353,7 +356,7 @@ fn bottom_bar(ctx: &egui::Context, cx: &mut Cx) -> f32 {
             });
         });
     });
-    r.response.rect.height() + 12.0
+    r.response.rect.height() + 6.0
 }
 
 impl App {
@@ -372,17 +375,20 @@ impl App {
                 let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
                 if let Some(p) = press {
                     let over_area = ctx.layer_id_at(p).map_or(false, |l| l.order != egui::Order::Background);
-                    if !over_area && p.y > BAR_H { cx.st.pop = None; cx.ed.block_input = true; }
+                    if !over_area && p.y > BAR_H + cx.st.safe[0] { cx.st.pop = None; cx.ed.block_input = true; }
                 }
             }
             if !hidden {
-                egui::TopBottomPanel::top("studio-top").exact_height(BAR_H).frame(egui::Frame::new().fill(bar_bg(light)).inner_margin(egui::Margin::symmetric(8, 4)))
+                let safe = cx.st.safe;
+                let m = egui::Margin { left: (8.0 + safe[2]).min(127.0) as i8, right: (8.0 + safe[3]).min(127.0) as i8, top: (4.0 + safe[0]).min(127.0) as i8, bottom: 4 };
+                egui::TopBottomPanel::top("studio-top").exact_height(BAR_H + safe[0]).frame(egui::Frame::new().fill(bar_bg(light)).inner_margin(m))
                     .show(ctx, |ui| top_bar(ui, &mut cx));
             }
             egui::CentralPanel::default().frame(egui::Frame::default().fill(stage)).show(ctx, |ui| cx.ed.canvas_ui(ui, cx.sh, stage));
             if !hidden {
-                let bh = bottom_bar(ctx, &mut cx);
-                side_bar(ctx, &mut cx, bh);
+                let bar = BAR_H + cx.st.safe[0];
+                let th = tool_bar(ctx, &mut cx, bar);
+                side_bar(ctx, &mut cx, bar + th);
                 popover(ctx, &mut cx);
             } else {
                 egui::Area::new(egui::Id::new("studio-show")).anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0]).show(ctx, |ui| {

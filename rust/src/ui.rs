@@ -79,6 +79,9 @@ pub struct UiState {
     /// Открытая всплывающая панель (интерфейс как в Procreate) и кнопка, у которой она открыта.
     pub pop: Option<Pop>,
     pub pop_anchor: Rect,
+    /// Безопасные отступы экрана в точках (сверху, снизу, слева, справа) — системные кнопки, вырез камеры.
+    pub safe: [f32; 4],
+    pub safe_t: f64,
     pub actions_tab: usize,
     pub color_tab: usize,
     pub eye_drag: Option<bool>,
@@ -96,7 +99,7 @@ impl Default for UiState {
         UiState {
             new_canvas: None, rename: None, layer_rename: None, resize: None, text: None, settings: false, help: false, confirm_delete: None,
             feather: None, dock_tab: [0, 0, 0], brush_cat: String::new(), win: Wins::default(), hex: String::new(), hsva: None, op_before: None,
-            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, pop: None, pop_anchor: Rect::NOTHING, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
+            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, pop: None, pop_anchor: Rect::NOTHING, safe: [0.0; 4], safe_t: -10.0, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
         }
     }
 }
@@ -1452,7 +1455,7 @@ impl App {
 
     pub fn gallery_ui(&mut self, ctx: &egui::Context) {
         let light = self.sh.prefs.light;
-        egui::TopBottomPanel::top("ghead").frame(egui::Frame::new().fill(if light { Color32::from_gray(232) } else { Color32::from_gray(20) }).inner_margin(egui::Margin::symmetric(14, 8))).show(ctx, |ui| {
+        egui::TopBottomPanel::top("ghead").frame(egui::Frame::new().fill(if light { Color32::from_gray(232) } else { Color32::from_gray(20) }).inner_margin(egui::Margin { left: 14, right: 14, top: (8.0 + self.ui.safe[0]).min(127.0) as i8, bottom: 8 })).show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("Мазок");
@@ -1697,7 +1700,7 @@ impl App {
         if let Some((m, t)) = &self.toast {
             if self.now - t > 2.6 || m.is_empty() { self.toast = None; return; }
             let m = m.clone();
-            egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0]).order(egui::Order::Tooltip).show(ctx, |ui| {
+            egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0 - self.ui.safe[1]]).order(egui::Order::Tooltip).show(ctx, |ui| {
                 // ширина по тексту: перенос только по словам, а не посреди слова
                 let maxw = (ctx.screen_rect().width() - 48.0).max(160.0);
                 let tw = text_w(ui, &m, 14.0).min(maxw);

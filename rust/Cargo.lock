@@ -713,8 +713,6 @@ dependencies = [
 [[package]]
 name = "egui_glow"
 version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "910906e3f042ea6d2378ec12a6fd07698e14ddae68aed2d819ffe944a73aab9e"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1480,7 +1478,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mazok"
-version = "3.3.0"
+version = "3.3.1"
 dependencies = [
  "ab_glyph",
  "android_logger",

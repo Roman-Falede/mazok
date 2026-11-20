@@ -7,8 +7,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.view.View;
+import android.view.WindowInsets;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -21,6 +25,56 @@ import java.io.OutputStream;
 public class MazokActivity extends NativeActivity {
     private static final Object LOCK = new Object();
     private static String result = null;
+
+    // Системные отступы экрана (кнопки навигации, вырез камеры) в пикселях: сверху, снизу, слева, справа.
+    private static volatile int insTop, insBottom, insLeft, insRight;
+
+    public static int[] insetsNow() {
+        return new int[] { insTop, insBottom, insLeft, insRight };
+    }
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        try {
+            getWindow().getDecorView().setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                public WindowInsets onApplyWindowInsets(View v, WindowInsets wi) {
+                    int t = wi.getSystemWindowInsetTop(), b = wi.getSystemWindowInsetBottom();
+                    int l = wi.getSystemWindowInsetLeft(), r = wi.getSystemWindowInsetRight();
+                    if (Build.VERSION.SDK_INT >= 28 && wi.getDisplayCutout() != null) {
+                        t = Math.max(t, wi.getDisplayCutout().getSafeInsetTop());
+                        b = Math.max(b, wi.getDisplayCutout().getSafeInsetBottom());
+                        l = Math.max(l, wi.getDisplayCutout().getSafeInsetLeft());
+                        r = Math.max(r, wi.getDisplayCutout().getSafeInsetRight());
+                    }
+                    insTop = t; insBottom = b; insLeft = l; insRight = r;
+                    return v.onApplyWindowInsets(wi);
+                }
+            });
+        } catch (Exception e) {
+            // без отступов
+        }
+        hideSystemUi();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemUi();
+    }
+
+    /** Полноэкранный режим: системные кнопки скрыты и появляются по свайпу от края. */
+    @SuppressWarnings("deprecation")
+    private void hideSystemUi() {
+        try {
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        } catch (Exception e) {
+            // обычный режим
+        }
+    }
 
     public static String takeResult() {
         synchronized (LOCK) {
