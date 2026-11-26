@@ -15,8 +15,6 @@ pub struct Prefs {
     pub pick_layer: bool,
     pub quick_shape: bool,
     pub quick_shape_delay: f32,
-    pub hold_pick: bool,
-    pub hold_delay: f32,
     pub touch_draw: bool,
     pub ui_mode: String,
     pub light: bool,
@@ -47,7 +45,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             pressure_gamma: 1.0, streamline_mul: 1.0, fill_tol: 22.0, fill_expand: 1, fill_all_layers: false, pick_layer: false,
-            quick_shape: true, quick_shape_delay: 0.65, hold_pick: true, hold_delay: 0.45, touch_draw: true, ui_mode: "studio".into(),
+            quick_shape: true, quick_shape_delay: 0.65, touch_draw: true, ui_mode: "studio".into(),
             light: false, cursor: true, ui_scale: 1.0, clone_aligned: true, stabilizer: 0.0, post_smooth: 0.0, vector_erase: "intersect".into(),
             export_dir: String::new(), quick_export: false, last_dir: String::new(), layer_thumb: 44.0, auto_taper: false, sidebar_right: false,
         }

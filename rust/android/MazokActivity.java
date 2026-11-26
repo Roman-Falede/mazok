@@ -6,10 +6,16 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.ImageDecoder;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.view.View;
 import android.view.WindowInsets;
@@ -124,6 +130,129 @@ public class MazokActivity extends NativeActivity {
         }
         i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
         start(i, 2);
+    }
+
+    /**
+     * Выбор фото: на Android 13+ — системный «Выбор фото» (галерея), раньше — выбор изображений
+     * через галерею или файлы. Результат приходит так же, как у openDocuments (код 2).
+     */
+    public void pickImages(final boolean multiple) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    try {
+                        Intent p = new Intent(MediaStore.ACTION_PICK_IMAGES);
+                        p.setType("image/*");
+                        if (multiple) {
+                            int max = Math.min(20, MediaStore.getPickImagesMaxLimit());
+                            if (max > 1) p.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, max);
+                        }
+                        startActivityForResult(p, 2);
+                        return;
+                    } catch (Exception e) {
+                        // ниже — обычный выбор
+                    }
+                }
+                try {
+                    Intent g = new Intent(Intent.ACTION_GET_CONTENT);
+                    g.addCategory(Intent.CATEGORY_OPENABLE);
+                    g.setType("image/*");
+                    g.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+                    startActivityForResult(g, 2);
+                } catch (Exception e) {
+                    try {
+                        Intent o = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        o.addCategory(Intent.CATEGORY_OPENABLE);
+                        o.setType("image/*");
+                        o.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+                        startActivityForResult(o, 2);
+                    } catch (Exception e2) {
+                        putResult("2\n0\n");
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Декодировать картинку системой: HEIC/HEIF, AVIF и всё, что умеет Android; поворот по EXIF;
+     * уменьшение до maxSide по большей стороне. Возвращает JPEG (если нет прозрачности) или PNG; null — ошибка.
+     */
+    public byte[] decodeImage(String uri, final int maxSide) {
+        Bitmap bmp = null;
+        try {
+            Uri u = Uri.parse(uri);
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.Source src = ImageDecoder.createSource(getContentResolver(), u);
+                bmp = ImageDecoder.decodeBitmap(src, new ImageDecoder.OnHeaderDecodedListener() {
+                    public void onHeaderDecoded(ImageDecoder d, ImageDecoder.ImageInfo info, ImageDecoder.Source s) {
+                        int w = info.getSize().getWidth(), h = info.getSize().getHeight();
+                        int m = Math.max(w, h);
+                        if (maxSide > 0 && m > maxSide) {
+                            float k = (float) maxSide / m;
+                            d.setTargetSize(Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)));
+                        }
+                        d.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                    }
+                });
+            } else {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                InputStream in = getContentResolver().openInputStream(u);
+                if (in == null) return null;
+                try { BitmapFactory.decodeStream(in, null, o); } finally { in.close(); }
+                int m = Math.max(o.outWidth, o.outHeight);
+                int sample = 1;
+                while (maxSide > 0 && m / (sample * 2) >= maxSide) sample *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = sample;
+                in = getContentResolver().openInputStream(u);
+                if (in == null) return null;
+                try { bmp = BitmapFactory.decodeStream(in, null, o2); } finally { in.close(); }
+                if (bmp == null) return null;
+                int rot = 0;
+                boolean flip = false;
+                in = getContentResolver().openInputStream(u);
+                if (in != null) {
+                    try {
+                        int ori = new ExifInterface(in).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                        switch (ori) {
+                            case ExifInterface.ORIENTATION_ROTATE_90: rot = 90; break;
+                            case ExifInterface.ORIENTATION_ROTATE_180: rot = 180; break;
+                            case ExifInterface.ORIENTATION_ROTATE_270: rot = 270; break;
+                            case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: flip = true; break;
+                            case ExifInterface.ORIENTATION_FLIP_VERTICAL: flip = true; rot = 180; break;
+                            case ExifInterface.ORIENTATION_TRANSPOSE: flip = true; rot = 270; break;
+                            case ExifInterface.ORIENTATION_TRANSVERSE: flip = true; rot = 90; break;
+                            default: break;
+                        }
+                    } catch (Exception e) {
+                        // без поворота
+                    } finally {
+                        in.close();
+                    }
+                }
+                int bm = Math.max(bmp.getWidth(), bmp.getHeight());
+                float k = maxSide > 0 && bm > maxSide ? (float) maxSide / bm : 1f;
+                if (rot != 0 || flip || k < 1f) {
+                    Matrix mx = new Matrix();
+                    if (k < 1f) mx.postScale(k, k);
+                    if (flip) mx.postScale(-1f, 1f);
+                    if (rot != 0) mx.postRotate(rot);
+                    Bitmap t = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), mx, true);
+                    if (t != bmp) { bmp.recycle(); bmp = t; }
+                }
+            }
+            if (bmp == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            boolean alpha = bmp.hasAlpha();
+            bmp.compress(alpha ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 95, out);
+            return out.toByteArray();
+        } catch (Throwable e) {
+            return null;
+        } finally {
+            if (bmp != null) bmp.recycle();
+        }
     }
 
     /** Выбор папки для сохранения (доступ запоминается). */

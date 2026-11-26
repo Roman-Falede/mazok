@@ -97,6 +97,15 @@ pub struct UiState {
     pub layer_scrolled: String,
     /// Перетаскиваемый слой (id).
     pub layer_drag: Option<String>,
+    /// Куда упадёт перетаскиваемый слой. Запоминается между кадрами: когда палец или перо
+    /// отрывают от экрана, egui уже не знает, где был указатель.
+    pub layer_drop: Option<editor::Drop>,
+    /// Касание пальцем/пером, которое прокручивает список слоёв (а не перетаскивает слой).
+    pub layer_swipe: bool,
+    /// Номер кадра, в котором список слоёв последний раз видел перетаскивание.
+    pub layer_drag_pass: u64,
+    /// Видимые строки панели слоёв в последнем кадре: id, строка, ручка ≡ (для автотеста).
+    pub layer_rows: Vec<(String, Rect, Rect)>,
     pub font_cache: HashMap<String, Vec<u8>>,
 }
 
@@ -105,7 +114,7 @@ impl Default for UiState {
         UiState {
             new_canvas: None, rename: None, layer_rename: None, resize: None, text: None, settings: false, help: false, confirm_delete: None,
             feather: None, dock_tab: [0, 0, 0], brush_cat: String::new(), win: Wins::default(), hex: String::new(), hsva: None, op_before: None,
-            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, export: None, last_export: None, pop: None, pop_anchor: Rect::NOTHING, safe: [0.0; 4], safe_t: -10.0, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, font_cache: HashMap::new(),
+            bset_open: [true, false, false, false, false, false, false, false, false], palette_export: None, export: None, last_export: None, pop: None, pop_anchor: Rect::NOTHING, safe: [0.0; 4], safe_t: -10.0, actions_tab: 0, color_tab: 0, eye_drag: None, dock_collapsed: [false; 3], layer_scrolled: String::new(), layer_drag: None, layer_drop: None, layer_swipe: false, layer_drag_pass: 0, layer_rows: vec![], font_cache: HashMap::new(),
         }
     }
 }
@@ -115,10 +124,15 @@ impl UiState {
         self.op_before = None;
         self.text = None;
         self.layer_rename = None;
+        self.layer_drag = None;
+        self.layer_drop = None;
+        self.layer_swipe = false;
     }
 }
 
 const ACCENT: Color32 = Color32::from_rgb(61, 143, 230);
+/// Сколько держать палец или перо на строке слоя, чтобы потом тащить её (быстрый взмах — прокрутка списка), с.
+const LAYER_HOLD: f64 = 0.28;
 
 /* ---------- иконки ---------- */
 
@@ -176,6 +190,8 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, name: &str, c: Color32) {
         "transfer" => { line(&[(12.0, 3.5), (12.0, 13.0)]); line(&[(8.0, 9.5), (12.0, 13.5), (16.0, 9.5)]); line(&[(4.0, 16.0), (20.0, 16.0), (20.0, 20.5), (4.0, 20.5), (4.0, 16.0)]); }
         "raster_new" => { line(&[(5.0, 3.5), (15.0, 3.5), (19.0, 7.5), (19.0, 20.5), (5.0, 20.5), (5.0, 3.5)]); line(&[(12.0, 9.0), (12.0, 17.0)]); line(&[(8.0, 13.0), (16.0, 13.0)]); }
         "vector" => { let pts: Vec<(f32, f32)> = (0..=16).map(|i| { let t = i as f32 / 16.0; let u = 1.0 - t; (u * u * 4.0 + 2.0 * u * t * 12.0 + t * t * 20.0, u * u * 19.0 + 2.0 * u * t * 1.0 + t * t * 19.0) }).collect(); line(&pts); for (x, y) in [(4.0, 19.0), (20.0, 19.0)] { p.rect_stroke(Rect::from_center_size(q(x, y), Vec2::splat(4.0 * k)), 0.0, s, egui::StrokeKind::Middle); } p.circle_filled(q(12.0, 10.0), 1.8 * k, c); }
+        "photo" => { line(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0), (3.0, 5.0)]); line(&[(3.0, 17.0), (9.0, 11.0), (13.5, 15.5), (16.0, 13.0), (21.0, 18.0)]); circ(15.5, 9.0, 1.7); }
+        "grip" => { for y in [8.0, 12.0, 16.0] { line(&[(6.0, y), (18.0, y)]); } }
         _ => { p.circle_filled(r.center(), 2.0 * k, c); }
     }
 }
@@ -381,7 +397,7 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     if ui.add(egui::Button::new("Свободное трансформирование").shortcut_text("Ctrl+T")).clicked() { ed.set_tool(Tool::Transform); ui.close_menu(); }
     if ui.button("Отразить слой по горизонтали").clicked() { ed.layer_flip(true); ui.close_menu(); }
     if ui.button("Отразить слой по вертикали").clicked() { ed.layer_flip(false); ui.close_menu(); }
-    if ui.button("Вставить изображение…").clicked() { cx.acts.push("insert_image"); ui.close_menu(); }
+    if ui.button("Вставить фото или изображение…").clicked() { cx.acts.push("insert_image"); ui.close_menu(); }
     ui.separator();
     if ui.button("Настройки…").clicked() { cx.st.settings = true; ui.close_menu(); }
 }
@@ -639,7 +655,7 @@ const TOOLS: [(Tool, Option<SelShape>, &str, &str); 19] = [
     (Tool::Select, Some(SelShape::Wand), "wand", "Волшебная палочка (W)"), (Tool::Brush, None, "brush", "Кисть (B)"), (Tool::Eraser, None, "eraser", "Ластик (E)"),
     (Tool::Smudge, None, "smudge", "Палец (R)"), (Tool::Clone, None, "clone", "Штамп (S)"), (Tool::Fill, None, "fill", "Заливка (G)"),
     (Tool::Gradient, None, "gradient", "Градиент (Shift+G)"), (Tool::Text, None, "text", "Текст (T)"), (Tool::Shapes, None, "shapes", "Фигуры (U)"),
-    (Tool::Picker, None, "picker", "Пипетка (I, Alt, правая кнопка, удержание)"), (Tool::Hand, None, "hand", "Рука (H, пробел)"), (Tool::Zoom, None, "zoom", "Масштаб (Z)"),
+    (Tool::Picker, None, "picker", "Пипетка (I; на компьютере также Alt или правая кнопка)"), (Tool::Hand, None, "hand", "Рука (H, пробел)"), (Tool::Zoom, None, "zoom", "Масштаб (Z)"),
     (Tool::Brush, None, "", ""), (Tool::Brush, None, "", ""), (Tool::Brush, None, "", ""),
 ];
 
@@ -691,6 +707,10 @@ fn color_panel(ui: &mut Ui, cx: &mut Cx) {
         if cx.st.hex.is_empty() || !ui.memory(|m| m.has_focus(egui::Id::new("hexedit"))) { cx.st.hex = util::hex(fg); }
         let r = ui.add(egui::TextEdit::singleline(&mut cx.st.hex).id(egui::Id::new("hexedit")).desired_width(80.0));
         if r.lost_focus() { if let Some(c) = util::parse_hex(&cx.st.hex) { cx.sh.colors.set(c); } }
+        if icon_btn(ui, "picker", cx.ed.tool == Tool::Picker, "Пипетка (I): коснитесь холста, чтобы взять цвет", Vec2::new(30.0, 26.0)).clicked() {
+            cx.ed.set_tool(Tool::Picker);
+            cx.st.pop = None;
+        }
     });
     if egui::color_picker::color_picker_hsva_2d(ui, &mut hsva, egui::color_picker::Alpha::Opaque) {
         let c = Color32::from(hsva);
@@ -1112,14 +1132,22 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
     let th = cx.sh.prefs.layer_thumb.clamp(28.0, 96.0);
     let row_h = (th * 0.75).max(28.0) + 8.0;
     let ctx = ui.ctx().clone();
-    let (pdown, hover, press, mods) = ui.input(|i| (i.pointer.primary_down(), i.pointer.hover_pos(), i.pointer.press_origin(), i.modifiers));
+    let (pdown, hover, press, press_t, now, touch, mods) = ui.input(|i| (i.pointer.primary_down(), i.pointer.hover_pos(), i.pointer.press_origin(), i.pointer.press_start_time(), i.time, i.any_touches(), i.modifiers));
+    let pass = ctx.cumulative_pass_nr();
+    // перетаскивание, брошенное посреди жеста (панель закрыли), — забыть, чтобы слой не «прыгнул» потом
+    if cx.st.layer_drag.is_some() && cx.st.layer_drag_pass + 2 < pass { cx.st.layer_drag = None; cx.st.layer_drop = None; }
+    if cx.st.layer_swipe && !pdown { cx.st.layer_swipe = false; }
     let nsel = cx.ed.selected().len();
     let dragging = cx.st.layer_drag.clone();
+    if dragging.is_some() { cx.st.layer_drag_pass = pass; }
     let mut drop_target: Option<editor::Drop> = None;
     let text_col = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
     let list_h = (ui.available_height() - 104.0).max(140.0);
     egui::ScrollArea::vertical().id_salt("layers_list").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+    // видимая часть списка: строки, прокрученные за край, не должны ловить перетаскивание
+    let clip = ui.clip_rect();
+    cx.st.layer_rows.clear();
     for &i in &rows {
         let layer = cx.ed.doc.layers[i].clone();
         let width = ui.available_width();
@@ -1133,6 +1161,12 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
         p.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 4.0, bg);
         if in_drag { p.rect_filled(rect, 4.0, Color32::from_black_alpha(60)); }
         let cy = rect.center().y;
+        // ручка ≡ справа: за неё слой перетаскивается сразу (и пальцем, и пером)
+        let grip_r = Rect::from_center_size(Pos2::new(rect.right() - 15.0, cy), Vec2::new(28.0, row_h - 4.0));
+        let grip_hot = dragging.as_ref() == Some(&layer.id) || hover.map_or(false, |h| grip_r.contains(h) && resp.hovered());
+        paint_icon(&p, Rect::from_center_size(grip_r.center(), Vec2::splat(20.0)), "grip", if grip_hot { ACCENT } else { weak });
+        if grip_hot && !touch { ctx.set_cursor_icon(if dragging.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }); }
+        if clip.intersects(rect) { cx.st.layer_rows.push((layer.id.clone(), rect, grip_r)); }
         // глаз
         let eye_r = Rect::from_center_size(Pos2::new(rect.left() + 14.0, cy), Vec2::new(22.0, 20.0));
         let shown = crate::doc::shown(&cx.ed.doc.layers, i);
@@ -1192,12 +1226,21 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
             x = mask_r.right() + 4.0;
         }
         // название и сведения
-        let name_r = Rect::from_min_max(Pos2::new(x + 2.0, rect.top()), Pos2::new(rect.right() - 4.0, rect.bottom()));
+        let is_locked = crate::doc::locked(&cx.ed.doc.layers, i);
+        let name_right = grip_r.left() - if is_locked { 20.0 } else { 2.0 };
+        let name_r = Rect::from_min_max(Pos2::new(x + 2.0, rect.top()), Pos2::new(name_right.max(x + 4.0), rect.bottom()));
         let font = egui::FontId::proportional(13.0);
-        p.text(Pos2::new(name_r.left(), cy - 1.0), egui::Align2::LEFT_BOTTOM, &layer.name, font, if active { Color32::WHITE } else { text_col });
-        p.text(Pos2::new(name_r.left(), cy + 1.0), egui::Align2::LEFT_TOP, layer_sub(&layer), egui::FontId::proportional(10.5), if active { Color32::from_white_alpha(200) } else { weak });
-        if crate::doc::locked(&cx.ed.doc.layers, i) {
-            paint_icon(&p, Rect::from_center_size(Pos2::new(rect.right() - 12.0, cy), Vec2::splat(15.0)), "lock", weak);
+        let np = p.with_clip_rect(name_r);
+        np.text(Pos2::new(name_r.left(), cy - 1.0), egui::Align2::LEFT_BOTTOM, &layer.name, font, if active { Color32::WHITE } else { text_col });
+        np.text(Pos2::new(name_r.left(), cy + 1.0), egui::Align2::LEFT_TOP, layer_sub(&layer), egui::FontId::proportional(10.5), if active { Color32::from_white_alpha(200) } else { weak });
+        if is_locked {
+            paint_icon(&p, Rect::from_center_size(Pos2::new(grip_r.left() - 10.0, cy), Vec2::splat(15.0)), "lock", weak);
+        }
+        // палец/перо: короткое удержание строки — и её можно тащить (рамка подсказывает, что слой «поднят»)
+        if touch && dragging.is_none() && !cx.st.layer_swipe && resp.is_pointer_button_down_on() && !press.map_or(false, |p0| eye_r.contains(p0)) {
+            let held = press_t.map_or(0.0, |t| now - t);
+            if held >= LAYER_HOLD { p.rect_stroke(rect.shrink(1.5), 4.0, EStroke::new(2.0, ACCENT), egui::StrokeKind::Inside); }
+            else { ctx.request_repaint_after(std::time::Duration::from_secs_f64(LAYER_HOLD - held + 0.01)); }
         }
         // щелчки
         if resp.clicked() {
@@ -1211,21 +1254,31 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
             else { acts.push(LAct::Select(i)); }
         }
         if resp.double_clicked() && resp.interact_pointer_pos().map_or(false, |p| name_r.contains(p)) { acts.push(LAct::Rename(i)); }
-        // перетаскивание: по глазам — видимость, по строке — порядок
+        // перетаскивание: по глазам — видимость, по строке — порядок.
+        // Мышь: тянуть за любое место строки. Палец и перо: за ручку ≡ — сразу, за остальную строку —
+        // после короткого удержания; быстрый взмах по строке прокручивает список.
         if resp.drag_started() {
-            if press.map_or(false, |p| eye_r.contains(p)) {
+            let p0 = press.unwrap_or(rect.center());
+            if eye_r.contains(p0) {
                 cx.st.eye_drag = Some(!layer.visible);
                 acts.push(LAct::Vis(i, !layer.visible));
+            } else if touch && !grip_r.contains(p0) && press_t.map_or(0.0, |t| now - t) < LAYER_HOLD {
+                cx.st.layer_swipe = true;
             } else {
                 cx.st.layer_drag = Some(layer.id.clone());
+                cx.st.layer_drop = None;
+                cx.st.layer_drag_pass = pass;
                 if !active && !multi { acts.push(LAct::Select(i)); }
             }
+        }
+        if cx.st.layer_swipe && resp.dragged() {
+            ui.scroll_with_delta_animation(Vec2::new(0.0, resp.drag_delta().y), egui::style::ScrollAnimation::none());
         }
         if let (Some(v), Some(hp)) = (cx.st.eye_drag, hover) {
             if rect.contains(hp) && layer.visible != v { acts.push(LAct::Vis(i, v)); }
         }
         if let (Some(d), Some(hp)) = (&dragging, hover) {
-            if rect.contains(hp) && !in_drag && *d != layer.id {
+            if clip.contains(hp) && rect.contains(hp) && !in_drag && *d != layer.id {
                 let rel = (hp.y - rect.top()) / row_h;
                 let target = if layer.group && (rel > 0.3 && (rel < 0.7 || !layer.collapsed)) { editor::Drop::Into(layer.id.clone()) }
                     else if rel < 0.5 { editor::Drop::Above(layer.id.clone()) } else { editor::Drop::Below(layer.id.clone()) };
@@ -1244,18 +1297,36 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
             layer_menu_items(ui, &layer, i, nsel, &mut acts);
         });
     }
+    // слой подтащили к верхнему или нижнему краю списка — список сам прокручивается
+    if let (Some(_), Some(hp)) = (&dragging, hover) {
+        let edge = (row_h * 0.7).clamp(20.0, 40.0);
+        let near_x = hp.x >= clip.left() - 30.0 && hp.x <= clip.right() + 30.0;
+        let up = clip.top() + edge - hp.y;
+        let down = hp.y - (clip.bottom() - edge);
+        let speed = |d: f32| (d / edge).clamp(0.0, 1.5) * 12.0;
+        if near_x && up > 0.0 && up < edge + 80.0 {
+            ui.scroll_with_delta_animation(Vec2::new(0.0, speed(up)), egui::style::ScrollAnimation::none());
+        } else if near_x && down > 0.0 && down < edge + 80.0 {
+            ui.scroll_with_delta_animation(Vec2::new(0.0, -speed(down)), egui::style::ScrollAnimation::none());
+        }
+    }
     });
     if let Some(d) = &dragging {
+        // цель запоминается каждый кадр: в кадре, когда палец или перо отрывают от экрана,
+        // позиции указателя уже нет (раньше из-за этого слой на сенсорном экране не перемещался)
+        if hover.is_some() { cx.st.layer_drop = drop_target.clone(); }
         if let Some(hp) = hover {
             let name = cx.ed.doc.find(d).map(|k| cx.ed.doc.layers[k].name.clone()).unwrap_or_default();
             let lp = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("layer-drag")));
-            let r = Rect::from_min_size(hp + Vec2::new(14.0, 6.0), Vec2::new(150.0, 22.0));
+            // под пальцем подпись не видна — показываем её выше
+            let off = if touch { Vec2::new(-160.0, -38.0) } else { Vec2::new(14.0, 6.0) };
+            let r = Rect::from_min_size(hp + off, Vec2::new(150.0, 22.0));
             lp.rect_filled(r, 4.0, ui.visuals().window_fill);
             lp.rect_stroke(r, 4.0, EStroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
             lp.text(r.left_center() + Vec2::new(6.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), text_col);
         }
         if !pdown {
-            if let Some(t) = drop_target.clone() { acts.push(LAct::Move(d.clone(), t)); }
+            if let Some(t) = cx.st.layer_drop.take() { acts.push(LAct::Move(d.clone(), t)); }
             cx.st.layer_drag = None;
         }
         ctx.request_repaint();
@@ -1278,6 +1349,7 @@ fn layers_panel(ui: &mut Ui, cx: &mut Cx) {
         let s = Vec2::new(26.0, 24.0);
         if icon_btn(ui, "raster_new", false, "Новый растровый слой (Ctrl+Shift+N)", s).clicked() { acts.push(LAct::Op("new_raster", li)); }
         if icon_btn(ui, "vector", false, "Новый векторный слой", s).clicked() { acts.push(LAct::Op("new_vector", li)); }
+        if icon_btn(ui, "photo", false, "Добавить фото или картинку новым слоем", s).clicked() { cx.acts.push("insert_image"); }
         if icon_btn(ui, "folder_new", false, "Новая папка (с выбранными слоями — Ctrl+G)", s).clicked() { acts.push(LAct::Op(if nsel > 1 { "group" } else { "new_folder" }, li)); }
         if icon_btn(ui, "copy", false, "Дублировать (Ctrl+J)", s).clicked() { acts.push(LAct::Op("dup", li)); }
         if icon_btn(ui, "transfer", false, "Перенести на нижний слой", s).clicked() { acts.push(LAct::Op("transfer", li)); }
@@ -1414,7 +1486,8 @@ fn status_bar(ui: &mut Ui, cx: &mut Cx) {
         ui.label(format!("Слой: {}", ed.doc.layer().name));
         ui.separator();
         let hint = match ed.tool {
-            Tool::Brush => "Кисть: удержание — пипетка, задержка в конце штриха — быстрая фигура",
+            Tool::Brush => "Кисть: задержка в конце штриха — быстрая фигура; цвет с холста — пипеткой (I)",
+            Tool::Picker => "Пипетка: щёлкните по холсту — цвет возьмётся, и вернётся прежний инструмент",
             Tool::Fill => "Заливка: тяните вбок, чтобы менять допуск",
             Tool::Select => "Выделение: Shift — добавить, Alt — вычесть",
             Tool::Transform => "Тяните маркеры; Shift — пропорционально; Enter — применить, Esc — отмена",
@@ -1468,19 +1541,31 @@ impl App {
 
     /* ---------- галерея ---------- */
 
+    /// Кнопки шапки галереи (справа налево).
+    fn gallery_buttons(&mut self, ui: &mut Ui) {
+        if ui.button("Импорт").on_hover_text("PNG, JPEG, PSD или .mazok — или перетащите файлы в окно").clicked() { self.import_files(); }
+        if ui.button("Фото").on_hover_text("Новый холст из фотографии").clicked() { self.insert_image(); }
+        if ui.button("Вставить").on_hover_text("Новый холст из картинки в буфере обмена (Ctrl+V)").clicked() { self.clipboard_paste(None); }
+        if ui.button("Настройки").clicked() { self.ui.settings = true; }
+    }
+
     pub fn gallery_ui(&mut self, ctx: &egui::Context) {
         let light = self.sh.prefs.light;
         egui::TopBottomPanel::top("ghead").frame(egui::Frame::new().fill(if light { Color32::from_gray(232) } else { Color32::from_gray(20) }).inner_margin(egui::Margin { left: 14, right: 14, top: (8.0 + self.ui.safe[0]).min(127.0) as i8, bottom: 8 })).show(ctx, |ui| {
             ui.add_space(6.0);
+            // на узком экране (телефон) кнопки — второй строкой, чтобы не налезали на заголовок
+            let narrow = ui.available_width() < 540.0;
             ui.horizontal(|ui| {
                 ui.heading("Мазок");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(egui::Button::new(egui::RichText::new("+ Холст").color(Color32::WHITE)).fill(ACCENT)).clicked() { self.ui.new_canvas = Some(NewCanvas::default()); }
-                    if ui.button("Импорт").on_hover_text("PNG, JPEG, PSD или .mazok — или перетащите файлы в окно").clicked() { self.import_files(); }
-                    if ui.button("Вставить").on_hover_text("Новый холст из картинки в буфере обмена (Ctrl+V)").clicked() { self.clipboard_paste(None); }
-                    if ui.button("Настройки").clicked() { self.ui.settings = true; }
+                    if !narrow { self.gallery_buttons(ui); }
                 });
             });
+            if narrow {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.gallery_buttons(ui)); });
+            }
             ui.add_space(4.0);
         });
         let mut open = None;
@@ -1823,8 +1908,9 @@ const HELP: &[(&str, &str)] = &[
     ("Перетаскивание файлов в окно", "Картинки, проекты, кисти .abr/.sut, палитры"), ("Alt + колесо мыши", "Размер кисти"), ("1 … 9, 0", "Непрозрачность 10…100 %"),
     ("Ctrl+G / Ctrl+Shift+G", "Объединить в папку / расформировать папку"), ("Ctrl+] / Ctrl+[", "Переместить слой выше / ниже"), ("Alt+] / Alt+[", "Выбрать слой выше / ниже"),
     ("Ctrl+щелчок / Shift+щелчок по слою", "Выбрать несколько слоёв"), ("Ctrl+щелчок по миниатюре", "Выделить по содержимому слоя"), ("Alt+щелчок по глазу", "Показать только этот слой"),
-    ("Перетаскивание по глазкам", "Скрыть или показать сразу несколько слоёв"), ("Перетаскивание слоя", "Изменить порядок, положить в папку"),
-    ("Tab", "Скрыть панели"), ("Удержание пера", "Пипетка"), ("Задержка в конце штриха", "Быстрая фигура: линия, круг, многоугольник"),
+    ("Перетаскивание по глазкам", "Скрыть или показать сразу несколько слоёв"), ("Перетаскивание слоя", "Изменить порядок, положить в папку (пальцем и пером — за ручку ≡ или после короткого удержания)"),
+    ("Кнопка пипетки / I", "Взять цвет с холста (потом вернётся прежний инструмент)"), ("Кнопка «Фото» в слоях", "Добавить фото или картинку новым слоем"),
+    ("Tab", "Скрыть панели"), ("Задержка в конце штриха", "Быстрая фигура: линия, круг, многоугольник"),
     ("2 пальца — касание", "Отменить"), ("3 пальца — касание", "Повторить"), ("2 пальца — движение", "Сдвиг, масштаб, поворот"), ("4 пальца — касание", "Скрыть панели"),
 ];
 
@@ -1869,8 +1955,6 @@ pub(crate) fn settings_contents(ui: &mut Ui, p: &mut crate::state::Prefs, pick_d
     wide_slider(ui, "Коррекция линии после штриха", &mut p.post_smooth, 0.0..=1.0, true);
     ui.horizontal_wrapped(|ui| { ui.label("Векторный ластик"); vector_erase_modes(ui, &mut p.vector_erase); });
     ui.checkbox(&mut p.touch_draw, "Рисование пальцем (иначе палец двигает холст)");
-    ui.checkbox(&mut p.hold_pick, "Пипетка при удержании");
-    wide_slider(ui, "Задержка пипетки, с", &mut p.hold_delay, 0.2..=1.2, false);
     ui.checkbox(&mut p.quick_shape, "Быстрая фигура (задержка в конце штриха)");
     wide_slider(ui, "Задержка фигуры, с", &mut p.quick_shape_delay, 0.3..=1.5, false);
     ui.checkbox(&mut p.cursor, "Контур кисти под курсором");

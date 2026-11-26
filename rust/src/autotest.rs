@@ -13,6 +13,17 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 type Action = Box<dyn FnOnce(&mut App, &mut AutoLog)>;
+/// Точки жеста в экранных координатах — считаются в момент начала жеста (по текущему положению панелей).
+type PathFn = Box<dyn FnOnce(&App) -> Vec<Pos2>>;
+
+/// Жест пальцем или мышью, который сейчас подаётся в программу.
+struct Gesture {
+    pts: Vec<Pos2>,
+    i: usize,
+    t0: Instant,
+    hold: f64,
+    touch: bool,
+}
 
 enum Step {
     Run(Action),
@@ -23,6 +34,9 @@ enum Step {
     Size(f32, f32),
     /// Штрих пером: (x, y, нажим) — события касания с силой нажима.
     Pen(Vec<(f32, f32, f32)>),
+    /// Жест в экранных координатах: удержание на месте hold секунд, потом движение по точкам.
+    /// touch = палец/перо так, как их передаёт egui-winit: касание + указатель, при отрыве — PointerGone.
+    Gesture(PathFn, f64, bool),
     Quit,
 }
 
@@ -45,6 +59,7 @@ pub struct AutoTest {
     steps: VecDeque<Step>,
     stroke: Option<(Vec<Pos2>, usize)>,
     pen: Option<(Vec<(Pos2, f32)>, usize)>,
+    gesture: Option<Gesture>,
     wait: u32,
     shots: usize,
     pub log: AutoLog,
@@ -273,6 +288,47 @@ impl AutoTest {
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("20-export-dialog.png"));
         s.push_back(run(Box::new(|a, _| { a.ui.export = None; })));
+        // перетаскивание слоёв пальцем, пером и мышью (слои A, B, C, D снизу вверх = 0, 1, 2, 3)
+        s.push_back(run(Box::new(|a, l| drag_setup(a, l))));
+        s.push_back(Step::Wait(8));
+        s.push_back(Step::Shot("21-layers-grip.png"));
+        s.push_back(Step::Gesture(Box::new(|a| row_drag(a, 0, 3, true, 0.2)), 0.0, true));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| order_check(a, l, &[1, 2, 3, 0], "пальцем за ручку ≡: нижний слой перетащен на самый верх"))));
+        s.push_back(Step::Gesture(Box::new(|a| row_drag(a, 2, 0, false, 0.2)), 0.0, true));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| order_check(a, l, &[1, 2, 3, 0], "быстрый взмах пальцем по строке прокручивает список, а не двигает слой"))));
+        s.push_back(Step::Gesture(Box::new(|a| row_drag(a, 1, 0, false, 0.2)), 0.45, true));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| order_check(a, l, &[2, 3, 0, 1], "палец: короткое удержание строки, потом перетаскивание"))));
+        s.push_back(Step::Gesture(Box::new(|a| row_drag(a, 2, 1, false, 0.2)), 0.0, false));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| order_check(a, l, &[3, 0, 1, 2], "мышью за строку: слой перетащен наверх"))));
+        s.push_back(Step::Gesture(Box::new(|a| row_drag(a, 2, 3, true, 0.8)), 0.0, true));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| order_check(a, l, &[2, 3, 0, 1], "пальцем за ручку ≡: верхний слой перетащен под нижний"))));
+        // цвет: удержание кисти больше не включает пипетку; инструмент «Пипетка» берёт цвет и возвращает кисть
+        s.push_back(run(Box::new(|a, l| picker_setup(a, l))));
+        s.push_back(Step::Wait(4));
+        s.push_back(Step::Gesture(Box::new(|a| canvas_pts(a, &[(0.5, 0.5), (0.5, 0.5)])), 0.9, false));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_mut().unwrap();
+            l.check(a.sh.colors.fg == [20, 20, 20] && ed.tool == Tool::Brush, format!("удержание кисти на месте не включает пипетку (цвет {:?}, инструмент {})", a.sh.colors.fg, ed.tool.name()));
+            ed.set_tool(Tool::Picker);
+        })));
+        s.push_back(Step::Wait(4));
+        s.push_back(Step::Shot("22-picker-tool.png"));
+        s.push_back(Step::Click(0.38, 0.38));
+        s.push_back(Step::Wait(4));
+        s.push_back(run(Box::new(|a, l| {
+            let ed = a.ed.as_ref().unwrap();
+            l.check(a.sh.colors.fg == [200, 120, 40] && ed.tool == Tool::Brush, format!("пипетка взяла цвет с холста и вернула кисть (цвет {:?}, инструмент {})", a.sh.colors.fg, ed.tool.name()));
+        })));
+        // фото: поворот по EXIF, HEIC, вставка новым слоем в лист
+        s.push_back(run(Box::new(|a, l| photo_test(a, l))));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Shot("23-photo-layer.png"));
         // ширина телефона: интерфейс как в Procreate не должен наезжать сам на себя
         s.push_back(Step::Size(412.0, 800.0));
         s.push_back(Step::Wait(12));
@@ -294,17 +350,61 @@ impl AutoTest {
         s.push_back(run(Box::new(|a, _| { a.ui.pop = None; if let Some(ed) = a.ed.as_mut() { ed.set_tool(Tool::Select); } })));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("18-phone-selection.png"));
+        s.push_back(run(Box::new(|a, _| { if let Some(ed) = a.ed.as_mut() { ed.set_tool(Tool::Brush); } a.to_gallery(); })));
+        s.push_back(Step::Wait(8));
+        s.push_back(Step::Shot("24-phone-gallery.png"));
         s.push_back(Step::Size(1400.0, 900.0));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Quit);
-        Some(AutoTest { dir, steps: s, stroke: None, pen: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
+        Some(AutoTest { dir, steps: s, stroke: None, pen: None, gesture: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
     }
 
     /// Вызывается перед кадром: подмешивает события мыши.
     pub fn input(app: &mut App, raw: &mut RawInput) {
+        // новый жест: точки считаются сейчас, по текущему положению панелей
+        let start = match app.test.as_mut() {
+            Some(t) if t.wait == 0 && t.stroke.is_none() && t.pen.is_none() && t.gesture.is_none() && matches!(t.steps.front(), Some(Step::Gesture(..))) => t.steps.pop_front(),
+            _ => None,
+        };
+        if let Some(Step::Gesture(f, hold, touch)) = start {
+            let pts = f(app);
+            if let Some(t) = app.test.as_mut() {
+                if pts.len() >= 2 { t.gesture = Some(Gesture { pts, i: 0, t0: Instant::now(), hold, touch }); } else { t.log.check(false, "жест: не найдено, куда нажимать"); }
+            }
+        }
         let Some(t) = app.test.as_mut() else { return };
         // настоящая мышь не должна вмешиваться в программные штрихи (если курсор оказался над окном)
         raw.events.retain(|e| !matches!(e, Event::PointerMoved(_) | Event::MouseMoved(_) | Event::PointerButton { .. } | Event::Touch { .. } | Event::PointerGone | Event::MouseWheel { .. }));
+        if let Some(g) = &mut t.gesture {
+            let mods = egui::Modifiers::NONE;
+            let touch = g.touch;
+            let tev = |pos: Pos2, phase: egui::TouchPhase| Event::Touch { device_id: egui::TouchDeviceId(2), id: egui::TouchId(9), phase, pos, force: None };
+            if g.i == 0 {
+                let p = g.pts[0];
+                if touch { raw.events.push(tev(p, egui::TouchPhase::Start)); }
+                raw.events.push(Event::PointerMoved(p));
+                raw.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: mods });
+                g.i = 1;
+                g.t0 = Instant::now();
+            } else if g.t0.elapsed().as_secs_f64() < g.hold {
+                // палец (или кнопка мыши) лежит на месте
+            } else if g.i < g.pts.len() {
+                let end = (g.i + 2).min(g.pts.len());
+                for p in &g.pts[g.i..end] {
+                    if touch { raw.events.push(tev(*p, egui::TouchPhase::Move)); }
+                    raw.events.push(Event::PointerMoved(*p));
+                }
+                g.i = end;
+            } else {
+                let p = *g.pts.last().unwrap();
+                if touch { raw.events.push(tev(p, egui::TouchPhase::End)); }
+                raw.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: mods });
+                // так делает egui-winit, когда палец отрывают: указатель исчезает
+                if touch { raw.events.push(Event::PointerGone); }
+                t.gesture = None;
+            }
+            return;
+        }
         let rect = app.ed.as_ref().map(|e| e.canvas_rect);
         let to = |p: (f32, f32)| rect.map_or(Pos2::ZERO, |r| Pos2::new(r.left() + r.width() * p.0, r.top() + r.height() * p.1));
         if let Some((pts, i)) = &mut t.pen {
@@ -383,7 +483,7 @@ impl AutoTest {
             }
         });
         ctx.request_repaint();
-        if t.stroke.is_some() || t.pen.is_some() {
+        if t.stroke.is_some() || t.pen.is_some() || t.gesture.is_some() {
             app.test = Some(t);
             return;
         }
@@ -763,6 +863,101 @@ fn layers_test2(a: &mut App, l: &mut AutoLog) {
     l.check(ed.doc.find(&ids[2]).map_or(false, |g| ed.doc.layers[g].group), "отмена объединения вернула папку");
     let _ = gi;
 }
+static DRAG_IDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Холст с четырьмя слоями A, B, C, D (снизу вверх) и открытая панель слоёв.
+fn drag_setup(a: &mut App, l: &mut AutoLog) {
+    a.create_doc("Перетаскивание слоёв", 800, 600, [255, 255, 255], true);
+    let ed = a.ed.as_mut().unwrap();
+    ed.doc.layers[0].name = "A".into();
+    for (k, (n, c)) in [("B", [220, 40, 40]), ("C", [40, 160, 60]), ("D", [40, 80, 220])].into_iter().enumerate() {
+        ed.layer_add();
+        let li = ed.doc.active;
+        ed.doc.layers[li].name = n.into();
+        fill_rect(ed, 100 + k * 180, 100, 260 + k * 180, 400, c);
+    }
+    let ids: Vec<String> = ed.doc.layers.iter().map(|x| x.id.clone()).collect();
+    l.check(ids.len() == 4, "холст с 4 слоями для перетаскивания");
+    *DRAG_IDS.lock().unwrap() = ids;
+    pop(a, crate::ui::Pop::Layers);
+}
+
+/// Путь от строки слоя from к строке to (rel — доля высоты целевой строки); grip — начать с ручки ≡.
+fn row_drag(a: &App, from: usize, to: usize, grip: bool, rel: f32) -> Vec<Pos2> {
+    let ids = DRAG_IDS.lock().unwrap().clone();
+    let find = |k: usize| ids.get(k).and_then(|id| a.ui.layer_rows.iter().find(|r| r.0 == *id)).map(|r| (r.1, r.2));
+    let (Some((fr, fg)), Some((tr, _))) = (find(from), find(to)) else { return vec![] };
+    let p0 = if grip { fg.center() } else { Pos2::new(fr.left() + fr.width() * 0.5, fr.center().y) };
+    let p1 = Pos2::new(p0.x, tr.top() + tr.height() * rel);
+    (0..=14).map(|i| p0 + (p1 - p0) * (i as f32 / 14.0)).collect()
+}
+
+/// Порядок слоёв A, B, C, D снизу вверх (номера 0…3).
+fn order_check(a: &App, l: &mut AutoLog, want: &[usize], what: &str) {
+    let ids = DRAG_IDS.lock().unwrap().clone();
+    let ed = a.ed.as_ref().unwrap();
+    let got: Vec<usize> = ed.doc.layers.iter().filter_map(|x| ids.iter().position(|i| *i == x.id)).collect();
+    l.check(got == want && a.ui.layer_drag.is_none(), format!("{what} (снизу вверх {got:?}, нужно {want:?})"));
+}
+
+/// Точки на холсте (доли области просмотра) в экранных координатах.
+fn canvas_pts(a: &App, pts: &[(f32, f32)]) -> Vec<Pos2> {
+    let Some(r) = a.ed.as_ref().map(|e| e.canvas_rect) else { return vec![] };
+    pts.iter().map(|p| Pos2::new(r.left() + r.width() * p.0, r.top() + r.height() * p.1)).collect()
+}
+
+/// Слой, залитый цветом (200, 120, 40), кисть с чёрным цветом.
+fn picker_setup(a: &mut App, l: &mut AutoLog) {
+    a.ui.pop = None;
+    let ed = a.ed.as_mut().unwrap();
+    ed.layer_add();
+    let (w, h) = (ed.doc.w, ed.doc.h);
+    fill_rect(ed, 0, 0, w, h, [200, 120, 40]);
+    ed.fit();
+    brush(a, "pencil_hb", 0.1, [20, 20, 20]);
+    l.info("пипетка: слой залит цветом (200, 120, 40), кисть чёрная");
+}
+
+/// Фото: поворот по EXIF, понятная ошибка для HEIC, вставка новым слоем — вписывается в лист.
+fn photo_test(a: &mut App, l: &mut AutoLog) {
+    // JPEG 40×20: слева красный, справа синий; в EXIF — «повернуть на 90° по часовой» (так снимают телефоны)
+    let mut img = Img::new(40, 20);
+    for y in 0..20 { for x in 0..40 { let k = img.idx(x, y); img.px[k..k + 4].copy_from_slice(if x < 20 { &[220, 30, 30, 255] } else { &[30, 30, 220, 255] }); } }
+    let jpg = formats::jpeg(&img, [255, 255, 255]);
+    let exif: [u8; 36] = [
+        0xFF, 0xE1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0,
+        b'I', b'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut bytes = jpg[..2].to_vec();
+    bytes.extend_from_slice(&exif);
+    bytes.extend_from_slice(&jpg[2..]);
+    match formats::decode_image(&bytes) {
+        Ok(d) => {
+            let px = |x: usize, y: usize| { let i = d.idx(x, y); [d.px[i], d.px[i + 1], d.px[i + 2]] };
+            let (top, bottom) = (px(10, 5), px(10, 34));
+            l.check(d.w == 20 && d.h == 40 && top[0] > 150 && top[2] < 100 && bottom[2] > 150 && bottom[0] < 100, format!("фото с пометкой поворота в EXIF открылось повёрнутым ({}×{}, сверху {top:?}, снизу {bottom:?})", d.w, d.h));
+        }
+        Err(e) => l.check(false, format!("фото с EXIF: {e}")),
+    }
+    let heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+    l.check(formats::decode_image(&heic).err().map_or(false, |e| e.contains("HEIC")), "фото HEIC: понятное сообщение вместо непонятной ошибки");
+    // большое фото — новым слоем, вписано в лист (холст с полем вокруг листа)
+    a.create_doc_margin("Фото", 800, 600, [255, 255, 255], true, 0.25);
+    let n0 = a.ed.as_ref().unwrap().doc.layers.len();
+    let big = Img::filled(2000, 1000, [40, 160, 90, 255]);
+    a.handle_open(crate::app::Purpose::InsertImage, vec![("Фото с телефона.png".into(), formats::png(&big))]);
+    let ed = a.ed.as_ref().unwrap();
+    l.check(ed.doc.layers.len() == n0 + 1 && ed.tool == Tool::Transform && ed.doc.layer().name == "Фото с телефона", "фото добавлено новым слоем, сразу можно двигать и масштабировать");
+    a.dispatch("enter");
+    let ed = a.ed.as_ref().unwrap();
+    let b = ed.doc.layer().img.content_bounds();
+    let s = ed.doc.sheet.unwrap_or(crate::util::Rect::new(0, 0, 0, 0));
+    let inside = b.map_or(false, |b| b.x >= s.x && b.y >= s.y && b.x + b.w <= s.x + s.w && b.y + b.h <= s.y + s.h && b.w >= s.w - 2);
+    l.check(inside, format!("фото вписано в лист, а не в весь холст (лист {s:?}, фото {b:?})"));
+}
+
 /// Открыть всплывающую панель интерфейса «как Procreate» (у правого края верхней полосы).
 fn pop(a: &mut App, p: crate::ui::Pop) {
     a.ui.pop = Some(p);

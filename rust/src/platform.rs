@@ -161,6 +161,37 @@ pub mod android {
         })
     }
 
+    /// Системный выбор фото (Android 13+ — «Выбор фото», раньше — галерея и файлы).
+    pub fn open_images(multiple: bool) -> Result<(), String> {
+        with(|env, a| {
+            env.call_method(a, "pickImages", "(Z)V", &[JValue::Bool(multiple as u8)])?;
+            Ok(())
+        })
+    }
+
+    /// Декодировать картинку средствами Android (HEIC, поворот по EXIF, уменьшение до max_side).
+    /// Возвращает JPEG (без прозрачности) или PNG.
+    pub fn decode_image(uri: &str, max_side: i32) -> Option<Vec<u8>> {
+        with(|env, a| {
+            let u = env.new_string(uri)?;
+            let r = env.call_method(a, "decodeImage", "(Ljava/lang/String;I)[B", &[JValue::Object(&u), JValue::Int(max_side)])?.l()?;
+            Ok(bytes_of(env, r))
+        }).ok().flatten()
+    }
+
+    /// Подготовить выбранный файл-картинку: если Rust её не прочтёт (HEIC) или она слишком большая
+    /// для памяти телефона, пусть систему декодирует и уменьшит Android. Проекты и PSD не трогаются.
+    pub fn prepare_image(uri: &str, file: (String, Vec<u8>), max_side: u32) -> (String, Vec<u8>) {
+        let lower = file.0.to_lowercase();
+        if [".mazok", ".zip", ".psd", ".abr", ".sut"].iter().any(|e| lower.ends_with(e)) { return file; }
+        let ok = !crate::formats::is_heif(&file.1) && crate::formats::image_dims(&file.1).map_or(false, |(w, h)| w.max(h) <= max_side);
+        if ok { return file; }
+        match decode_image(uri, max_side as i32) {
+            Some(b) if !b.is_empty() => (file.0, b),
+            _ => file,
+        }
+    }
+
     pub fn create(name: &str, mime: &str) -> Result<(), String> {
         with(|env, a| {
             let n = env.new_string(name)?;

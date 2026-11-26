@@ -152,13 +152,35 @@ pub fn jpeg_q(img: &Img, bg: [u8; 3], quality: u8) -> Vec<u8> {
 }
 
 pub fn decode_image(bytes: &[u8]) -> Result<Img, String> {
+    if is_heif(bytes) {
+        return Err("Фото в формате HEIC/HEIF/AVIF здесь не открывается — сохраните его как JPEG или PNG".into());
+    }
+    // Фото с телефона часто хранится «боком» с пометкой о повороте в EXIF — поворачиваем сразу
+    let oriented = (|| -> image::ImageResult<image::DynamicImage> {
+        use image::ImageDecoder;
+        let mut dec = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
+        let orient = dec.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut im = image::DynamicImage::from_decoder(dec)?;
+        im.apply_orientation(orient);
+        Ok(im)
+    })();
     // у TGA нет сигнатуры — пробуем его, если формат не распознан
-    let im = image::load_from_memory(bytes)
+    let im = oriented
         .or_else(|e| image::load_from_memory_with_format(bytes, image::ImageFormat::Tga).map_err(|_| e))
         .map_err(|e| format!("Не удалось открыть изображение: {e}"))?
         .to_rgba8();
     let (w, h) = im.dimensions();
     Ok(Img::from_straight(w as usize, h as usize, im.as_raw()))
+}
+
+/// HEIC/HEIF/AVIF (контейнер ISO BMFF): так сохраняют фото многие телефоны.
+pub fn is_heif(bytes: &[u8]) -> bool {
+    bytes.len() > 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1" | b"avif" | b"avis")
+}
+
+/// Размер картинки без полного декодирования (None — формат не распознан).
+pub fn image_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
 /* ---------- проект .mazok ---------- */
