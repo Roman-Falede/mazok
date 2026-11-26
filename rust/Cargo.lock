@@ -1489,7 +1489,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mazok"
-version = "3.4.0"
+version = "3.5.0"
 dependencies = [
  "ab_glyph",
  "android_logger",
