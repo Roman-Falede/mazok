@@ -29,8 +29,8 @@ pub enum Purpose { Import, InsertImage, Brushes, Palette, TipImage, GrainImage }
 impl Purpose {
     fn spec(self) -> (&'static str, &'static str, &'static [&'static str], bool) {
         match self {
-            Purpose::Import => ("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff", "tga", "psd", "mazok", "zip"], true),
-            Purpose::InsertImage => ("Вставить изображение", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff", "tga"], true),
+            Purpose::Import => ("Открыть", "Изображения и проекты", &["png", "jpg", "jpeg", "jfif", "jpe", "webp", "bmp", "gif", "tif", "tiff", "tga", "psd", "mazok", "zip"], true),
+            Purpose::InsertImage => ("Добавить фото или картинку", "Фото и картинки", &["png", "jpg", "jpeg", "jfif", "jpe", "webp", "bmp", "gif", "tif", "tiff", "tga"], true),
             Purpose::Brushes => ("Импорт кистей", "Кисти Photoshop и Clip Studio", &["abr", "sut"], true),
             Purpose::Palette => ("Импорт палитры", "Палитры", &crate::palette::EXTS, true),
             Purpose::TipImage => ("Форма отпечатка из картинки", "Изображения", &["png", "jpg", "jpeg", "webp", "bmp"], false),
@@ -282,7 +282,9 @@ impl App {
         #[cfg(target_os = "android")]
         {
             let _ = (title, name, exts);
-            match platform::android::open(purpose.mimes(), multiple) {
+            // для картинок — системный выбор фото (галерея), для остального — выбор файлов
+            let r = if purpose.mimes() == "image/*" { platform::android::open_images(multiple) } else { platform::android::open(purpose.mimes(), multiple) };
+            match r {
                 Ok(()) => self.pending = Some(Pending::Open(purpose)),
                 Err(e) => self.toast(format!("Не удалось открыть выбор файлов: {e}")),
             }
@@ -373,10 +375,12 @@ impl App {
         if let Some(ed) = &mut self.ed {
             ed.layer_add_image(img, if name.is_empty() { "Вставка" } else { name });
             ed.set_tool(Tool::Transform);
-            self.toast("Изображение добавлено новым слоем — подвиньте и нажмите Enter");
+            self.toast("Добавлено новым слоем — подвиньте и примените: Enter или ещё раз «Трансформация»");
         } else {
-            let (w, h) = (img.w.min(8192), img.h.min(8192));
-            let img = if (w, h) != (img.w, img.h) { img.resize(w, h) } else { img };
+            // большое фото уменьшается с сохранением пропорций (не больше 8192 px по стороне и 36 Мп)
+            let k = (8192.0 / img.w.max(img.h).max(1) as f32).min((36e6 / (img.w * img.h).max(1) as f32).sqrt()).min(1.0);
+            let img = if k < 1.0 { img.resize(((img.w as f32 * k) as usize).max(1), ((img.h as f32 * k) as usize).max(1)) } else { img };
+            let (w, h) = (img.w, img.h);
             let mut d = Document::new(if name.is_empty() { "Вставка" } else { name }, w, h, [255, 255, 255], true);
             d.layers[0].img = std::sync::Arc::new(img);
             let _ = write_doc(&self.docs_dir, &d);
@@ -513,7 +517,12 @@ impl App {
             if !r.ok || r.uris.is_empty() { return; }
             match p {
                 Pending::Open(purpose) => {
-                    let files: Vec<(String, Vec<u8>)> = r.uris.iter().filter_map(|u| platform::android::read(u)).collect();
+                    // фото: HEIC и очень большие снимки декодирует сама система (с уменьшением и поворотом по EXIF)
+                    let limit = if purpose == Purpose::Import { 8192 } else { 4096 };
+                    let images = matches!(purpose, Purpose::Import | Purpose::InsertImage | Purpose::TipImage | Purpose::GrainImage);
+                    let files: Vec<(String, Vec<u8>)> = r.uris.iter().filter_map(|u| {
+                        platform::android::read(u).map(|f| if images { platform::android::prepare_image(u, f, limit) } else { f })
+                    }).collect();
                     if files.is_empty() { self.toast("Не удалось прочитать файл"); }
                     self.handle_open(purpose, files);
                 }

@@ -126,7 +126,6 @@ enum Active {
         grain: Option<(Arc<Grain>, f32, f32)>,
         blend: Blend,
         start: Pos2,
-        start_t: f64,
         started: bool,
         shape: Option<&'static str>,
         qs_anchor: Pos2,
@@ -1161,24 +1160,15 @@ impl Editor {
         self.loupe = None;
     }
 
-    /// Таймеры: пипетка при удержании и быстрые фигуры.
+    /// Таймер быстрых фигур (задержка в конце штриха).
+    /// Пипетки по удержанию больше нет: цвет берётся инструментом «Пипетка» (I), Alt или правой кнопкой.
     fn tick(&mut self, sh: &mut Shared) {
         let now = self.now;
-        let mut do_pick = false;
         let mut do_shape = false;
-        if let Some(Active::Paint { mode, started, start_t, shape, qs_t, .. }) = &self.active {
-            if !*started && sh.prefs.hold_pick && *mode != PaintMode::Clone && now - *start_t > sh.prefs.hold_delay as f64 {
-                do_pick = true;
-            }
+        if let Some(Active::Paint { mode, started, shape, qs_t, .. }) = &self.active {
             if *started && shape.is_none() && sh.prefs.quick_shape && matches!(mode, PaintMode::Paint | PaintMode::Erase) && now - *qs_t > sh.prefs.quick_shape_delay as f64 {
                 do_shape = true;
             }
-        }
-        if do_pick {
-            let pos = match &self.active { Some(Active::Paint { start, .. }) => *start, _ => Pos2::ZERO };
-            self.cancel();
-            self.active = Some(Active::Pick);
-            self.pick_preview(pos, sh);
         }
         if do_shape {
             let hit = match &self.active { Some(Active::Paint { stroke, .. }) => brush::detect_shape(&stroke.pts), _ => None };
@@ -1276,7 +1266,7 @@ impl Editor {
             stroke.lazy_r = sh.prefs.stabilizer.clamp(0.0, 1.0) * 70.0 / self.view.s.max(0.01);
         }
         self.active = Some(Active::Paint {
-            mode, stroke, total: None, opacity: ts.opacity, grain, blend, start: pos, start_t: self.now, started: false, shape: None,
+            mode, stroke, total: None, opacity: ts.opacity, grain, blend, start: pos, started: false, shape: None,
             qs_anchor: pos, qs_t: self.now, picks: vec![], clone_src, clone_off,
         });
         self.paint_feed(|s, sink| s.add(x, y, pressure, 0.0, sink));
@@ -2218,9 +2208,14 @@ impl Editor {
     pub fn layer_add_image(&mut self, img: Img, name: &str) {
         self.commit_pending();
         let mut l = Layer::new(self.doc.w, self.doc.h, name);
-        let k = (self.doc.w as f32 / img.w as f32).min(self.doc.h as f32 / img.h as f32).min(1.0);
+        // фото вписывается в лист (если вокруг листа есть поле — то именно в лист, а не во весь холст)
+        let (fx, fy, fw, fh) = match self.doc.sheet {
+            Some(s) if s.w > 0 && s.h > 0 => (s.x, s.y, s.w, s.h),
+            _ => (0, 0, self.doc.w as i32, self.doc.h as i32),
+        };
+        let k = (fw as f32 / img.w as f32).min(fh as f32 / img.h as f32).min(1.0);
         let im = if k < 1.0 { img.resize(((img.w as f32 * k) as usize).max(1), ((img.h as f32 * k) as usize).max(1)) } else { img };
-        let (x, y) = ((self.doc.w as i32 - im.w as i32) / 2, (self.doc.h as i32 - im.h as i32) / 2);
+        let (x, y) = (fx + (fw - im.w as i32) / 2, fy + (fh - im.h as i32) / 2);
         l.img_mut().put(x, y, &im);
         self.add_layer(l, "Вставить изображение");
     }

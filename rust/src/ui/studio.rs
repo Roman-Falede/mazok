@@ -27,7 +27,8 @@ fn toggle(st: &mut UiState, p: Pop, r: Rect) {
 
 fn top_bar(ui: &mut Ui, cx: &mut Cx) {
     let w = ui.available_width();
-    let s = ((w - 20.0) / 10.6).clamp(30.0, 42.0);
+    // 12 кнопок: на узком экране (телефон) все должны поместиться в одну строку
+    let s = ((w - 24.0) / 12.4).clamp(27.0, 42.0);
     let narrow = w < 560.0;
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = if narrow { 0.0 } else { 3.0 };
@@ -61,6 +62,12 @@ fn top_bar(ui: &mut Ui, cx: &mut Cx) {
                 if r.clicked() {
                     if cx.ed.tool == t { toggle(cx.st, Pop::Brushes, r.rect); } else { cx.ed.set_tool(t); if cx.st.pop == Some(Pop::Brushes) { cx.st.pop_anchor = r.rect; } }
                 }
+            }
+            // пипетка — рядом с кистью: коснуться холста, взять цвет, и снова рисовать прежним инструментом
+            let r = top_icon(ui, "picker", cx.ed.tool == Tool::Picker, "Пипетка (I): коснитесь холста, чтобы взять цвет; потом вернётся прежний инструмент", s);
+            if r.clicked() {
+                cx.st.pop = None;
+                if cx.ed.tool == Tool::Picker { let p = cx.ed.prev_tool; cx.ed.set_tool(p); } else { cx.ed.set_tool(Tool::Picker); }
             }
         });
     });
@@ -117,9 +124,10 @@ fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
                 let r_size = r.rect;
                 let size_active = r.dragged() || r.is_pointer_button_down_on();
                 let (sq, sresp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-                ui.painter().rect_stroke(sq.shrink(3.0), 6.0, EStroke::new(1.5, ui.visuals().strong_text_color()), egui::StrokeKind::Inside);
-                paint_icon(ui.painter(), sq.shrink(7.0), "picker", ui.visuals().strong_text_color());
-                if sresp.on_hover_text("Пипетка (I, Alt или удержание на холсте)").clicked() { cx.acts.push("t_picker"); }
+                let pc = if cx.ed.tool == Tool::Picker { ACCENT } else { ui.visuals().strong_text_color() };
+                ui.painter().rect_stroke(sq.shrink(3.0), 6.0, EStroke::new(1.5, pc), egui::StrokeKind::Inside);
+                paint_icon(ui.painter(), sq.shrink(7.0), "picker", pc);
+                if sresp.on_hover_text("Пипетка (I): коснитесь холста, чтобы взять цвет").clicked() { cx.acts.push("t_picker"); }
                 let r = vslider(ui, &mut op, 0.01, 1.0, Vec2::new(w - 12.0, op_h), "Непрозрачность");
                 let op_active = r.dragged() || r.is_pointer_button_down_on();
                 let r_op = r.rect;
@@ -209,7 +217,7 @@ fn actions_pop(ui: &mut Ui, cx: &mut Cx, h: f32) {
     egui::ScrollArea::vertical().id_salt("act").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
         match tab {
             0 => {
-                for (k, n) in [("insert_image", "Вставить файл изображения…"), ("paste", "Вставить из буфера обмена  (Ctrl+V)"), ("copy", "Копировать  (Ctrl+C)"), ("copy_merged", "Копировать совмещённые  (Ctrl+Shift+C)"), ("cut", "Вырезать  (Ctrl+X)"), ("t_text", "Добавить текст"), ("layer_new", "Новый слой"), ("layer_new_vector", "Новый векторный слой"), ("layer_folder", "Новая папка"), ("open", "Открыть или импортировать файл…")] {
+                for (k, n) in [("insert_image", "Добавить фото или картинку…"), ("paste", "Вставить из буфера обмена  (Ctrl+V)"), ("copy", "Копировать  (Ctrl+C)"), ("copy_merged", "Копировать совмещённые  (Ctrl+Shift+C)"), ("cut", "Вырезать  (Ctrl+X)"), ("t_text", "Добавить текст"), ("layer_new", "Новый слой"), ("layer_new_vector", "Новый векторный слой"), ("layer_folder", "Новая папка"), ("open", "Открыть или импортировать файл…")] {
                     if big_button(ui, n).clicked() { cx.acts.push(k); cx.st.pop = None; }
                 }
             }
