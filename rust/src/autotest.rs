@@ -37,6 +37,8 @@ enum Step {
     /// Жест в экранных координатах: удержание на месте hold секунд, потом движение по точкам.
     /// touch = палец/перо так, как их передаёт egui-winit: касание + указатель, при отрыве — PointerGone.
     Gesture(PathFn, f64, bool),
+    /// Перо над экраном без касания — так его присылает Windows: движение касания без начала.
+    Hover(PathFn),
     Quit,
 }
 
@@ -60,6 +62,7 @@ pub struct AutoTest {
     stroke: Option<(Vec<Pos2>, usize)>,
     pen: Option<(Vec<(Pos2, f32)>, usize)>,
     gesture: Option<Gesture>,
+    hover: Option<(Vec<Pos2>, usize)>,
     wait: u32,
     shots: usize,
     pub log: AutoLog,
@@ -329,6 +332,47 @@ impl AutoTest {
         s.push_back(run(Box::new(|a, l| photo_test(a, l))));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Shot("23-photo-layer.png"));
+        // пиксель-арт: дуга мышью без «пиксель-идеальности» (есть уголки) и с ней (уголков нет)
+        s.push_back(run(Box::new(|a, l| pixel_setup(a, l))));
+        s.push_back(Step::Wait(8));
+        s.push_back(run(Box::new(|a, _| { a.sh.prefs.pixel_perfect = false; a.ed.as_mut().unwrap().layer_add(); })));
+        s.push_back(Step::Stroke(arc(0.5, 0.5, 0.3, 120)));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| pixel_line_check(a, l, false))));
+        s.push_back(run(Box::new(|a, _| { a.sh.prefs.pixel_perfect = true; a.ed.as_mut().unwrap().layer_add(); })));
+        s.push_back(Step::Stroke(arc(0.5, 0.5, 0.3, 120)));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| pixel_line_check(a, l, true))));
+        s.push_back(run(Box::new(|a, _| { a.sh.prefs.pixel_brush = 3; a.ed.as_mut().unwrap().layer_add(); })));
+        s.push_back(Step::Stroke((0..=20).map(|i| (0.3 + 0.4 * i as f32 / 20.0, 0.8)).collect()));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| pixel_thick_check(a, l))));
+        s.push_back(Step::Hover(Box::new(|a| canvas_pts(a, &[(0.62, 0.3), (0.63, 0.31), (0.64, 0.32), (0.65, 0.33)]))));
+        s.push_back(Step::Shot("24-pixel-art.png"));
+        s.push_back(run(Box::new(|a, l| hover_check(a, l, (0.65, 0.33), "пиксель-арт"))));
+        // заливка точно по цвету (допуск 0) и прямоугольник в 1 пиксель
+        s.push_back(run(Box::new(|a, _| pixel_fill_setup(a))));
+        s.push_back(Step::Click(0.4, 0.5));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| pixel_fill_check(a, l))));
+        s.push_back(Step::Stroke(vec![(0.42, 0.3), (0.5, 0.4), (0.58, 0.62)]));
+        s.push_back(Step::Wait(3));
+        s.push_back(run(Box::new(|a, l| pixel_rect_check(a, l, (0.42, 0.3), (0.58, 0.62)))));
+        s.push_back(run(Box::new(|a, l| pixel_export_check(a, l))));
+        // перо над экраном в обычном рисунке: круг размера и форма кисти; у ластика — тоже
+        s.push_back(run(Box::new(|a, l| {
+            a.create_doc("Наведение пера", 1200, 900, [255, 255, 255], true);
+            brush(a, "leaves", 0.8, [200, 60, 40]);
+            l.info("наведение пера: кисть «листья» (отпечаток — лист)");
+        })));
+        s.push_back(Step::Wait(6));
+        s.push_back(Step::Hover(Box::new(|a| canvas_pts(a, &[(0.40, 0.45), (0.42, 0.46), (0.44, 0.47), (0.45, 0.48)]))));
+        s.push_back(Step::Shot("25-pen-hover-brush.png"));
+        s.push_back(run(Box::new(|a, l| hover_check(a, l, (0.45, 0.48), "кисть"))));
+        s.push_back(run(Box::new(|a, _| { let ed = a.ed.as_mut().unwrap(); ed.set_tool(Tool::Eraser); let ts = ed.tool_state_mut(&mut a.sh); ts.size = 0.7; })));
+        s.push_back(Step::Hover(Box::new(|a| canvas_pts(a, &[(0.55, 0.45), (0.57, 0.46), (0.6, 0.5)]))));
+        s.push_back(Step::Shot("26-pen-hover-eraser.png"));
+        s.push_back(run(Box::new(|a, l| hover_check(a, l, (0.6, 0.5), "ластик"))));
         // ширина телефона: интерфейс как в Procreate не должен наезжать сам на себя
         s.push_back(Step::Size(412.0, 800.0));
         s.push_back(Step::Wait(12));
@@ -356,25 +400,41 @@ impl AutoTest {
         s.push_back(Step::Size(1400.0, 900.0));
         s.push_back(Step::Wait(6));
         s.push_back(Step::Quit);
-        Some(AutoTest { dir, steps: s, stroke: None, pen: None, gesture: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
+        Some(AutoTest { dir, steps: s, stroke: None, pen: None, gesture: None, hover: None, wait: 0, shots: 0, log: AutoLog::default(), stroke_frames: vec![], last: None, quit: false, done: false, start: Instant::now() })
     }
 
     /// Вызывается перед кадром: подмешивает события мыши.
     pub fn input(app: &mut App, raw: &mut RawInput) {
         // новый жест: точки считаются сейчас, по текущему положению панелей
         let start = match app.test.as_mut() {
-            Some(t) if t.wait == 0 && t.stroke.is_none() && t.pen.is_none() && t.gesture.is_none() && matches!(t.steps.front(), Some(Step::Gesture(..))) => t.steps.pop_front(),
+            Some(t) if t.wait == 0 && t.stroke.is_none() && t.pen.is_none() && t.gesture.is_none() && t.hover.is_none() && matches!(t.steps.front(), Some(Step::Gesture(..)) | Some(Step::Hover(..))) => t.steps.pop_front(),
             _ => None,
         };
-        if let Some(Step::Gesture(f, hold, touch)) = start {
-            let pts = f(app);
-            if let Some(t) = app.test.as_mut() {
-                if pts.len() >= 2 { t.gesture = Some(Gesture { pts, i: 0, t0: Instant::now(), hold, touch }); } else { t.log.check(false, "жест: не найдено, куда нажимать"); }
+        match start {
+            Some(Step::Gesture(f, hold, touch)) => {
+                let pts = f(app);
+                if let Some(t) = app.test.as_mut() {
+                    if pts.len() >= 2 { t.gesture = Some(Gesture { pts, i: 0, t0: Instant::now(), hold, touch }); } else { t.log.check(false, "жест: не найдено, куда нажимать"); }
+                }
             }
+            Some(Step::Hover(f)) => {
+                let pts = f(app);
+                if let Some(t) = app.test.as_mut() {
+                    if !pts.is_empty() { t.hover = Some((pts, 0)); } else { t.log.check(false, "наведение: не найдено, куда наводить"); }
+                }
+            }
+            _ => {}
         }
         let Some(t) = app.test.as_mut() else { return };
         // настоящая мышь не должна вмешиваться в программные штрихи (если курсор оказался над окном)
         raw.events.retain(|e| !matches!(e, Event::PointerMoved(_) | Event::MouseMoved(_) | Event::PointerButton { .. } | Event::Touch { .. } | Event::PointerGone | Event::MouseWheel { .. }));
+        if let Some((pts, i)) = &mut t.hover {
+            // перо над экраном (Windows): движение касания, которое не начиналось
+            raw.events.push(Event::Touch { device_id: egui::TouchDeviceId(3), id: egui::TouchId(77), phase: egui::TouchPhase::Move, pos: pts[*i], force: Some(0.0) });
+            *i += 1;
+            if *i >= pts.len() { t.hover = None; }
+            return;
+        }
         if let Some(g) = &mut t.gesture {
             let mods = egui::Modifiers::NONE;
             let touch = g.touch;
@@ -483,7 +543,7 @@ impl AutoTest {
             }
         });
         ctx.request_repaint();
-        if t.stroke.is_some() || t.pen.is_some() || t.gesture.is_some() {
+        if t.stroke.is_some() || t.pen.is_some() || t.gesture.is_some() || t.hover.is_some() {
             app.test = Some(t);
             return;
         }
@@ -863,6 +923,144 @@ fn layers_test2(a: &mut App, l: &mut AutoLog) {
     l.check(ed.doc.find(&ids[2]).map_or(false, |g| ed.doc.layers[g].group), "отмена объединения вернула папку");
     let _ = gi;
 }
+/// Дуга в три четверти окружности (доли области просмотра): изгиб во все стороны, без самопересечения.
+fn arc(cx: f32, cy: f32, r: f32, n: usize) -> Vec<(f32, f32)> {
+    (0..=n).map(|i| { let a = i as f32 / n as f32 * std::f32::consts::PI * 1.5; (cx + a.cos() * r * 0.75, cy + a.sin() * r) }).collect()
+}
+
+/// Холст 32×32 сразу в режиме пиксель-арта, пиксельный карандаш 1 px.
+fn pixel_setup(a: &mut App, l: &mut AutoLog) {
+    a.create_doc_opts("Пиксель-арт", 32, 32, [255, 255, 255], false, 0.15, true);
+    a.sh.prefs.pixel_brush = 1;
+    a.sh.prefs.pixel_round = false;
+    brush(a, "pencil_hb", 0.3, [30, 30, 40]);
+    let ed = a.ed.as_ref().unwrap();
+    l.check(ed.pixel_mode() && ed.doc.guide.pixel_grid && ed.doc.sheet.is_none() && ed.doc.w == 32, "новый холст 32×32 в режиме пиксель-арта: без поля, с сеткой пикселей");
+    // включение и выключение режима на готовом рисунке
+    let mut d = crate::doc::Document::new("t", 8, 8, [255, 255, 255], true);
+    d.guide.pixel = false;
+    let mut e = crate::editor::Editor::new(d);
+    e.set_pixel_mode(true);
+    let on = e.pixel_mode() && e.doc.guide.pixel_grid;
+    e.set_pixel_mode(false);
+    l.check(on && !e.pixel_mode(), "режим пиксель-арта включается и выключается на готовом рисунке");
+}
+
+/// Пиксели активного слоя: (закрашено, полупрозрачных, «уголков» — пиксель с соседями и сбоку, и сверху/снизу, блоков 2×2).
+fn pixel_stats(img: &Img) -> (usize, usize, usize, usize) {
+    let (w, h) = (img.w as i32, img.h as i32);
+    let on = |x: i32, y: i32| x >= 0 && y >= 0 && x < w && y < h && img.px[img.idx(x as usize, y as usize) + 3] > 0;
+    let (mut n, mut soft, mut corners, mut blocks) = (0, 0, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let al = img.px[img.idx(x as usize, y as usize) + 3];
+            if al > 0 && al < 255 { soft += 1; }
+            if !on(x, y) { continue; }
+            n += 1;
+            if (on(x - 1, y) || on(x + 1, y)) && (on(x, y - 1) || on(x, y + 1)) { corners += 1; }
+            if on(x + 1, y) && on(x, y + 1) && on(x + 1, y + 1) { blocks += 1; }
+        }
+    }
+    (n, soft, corners, blocks)
+}
+
+fn pixel_line_check(a: &mut App, l: &mut AutoLog, perfect: bool) {
+    let ed = a.ed.as_mut().unwrap();
+    let (n, soft, corners, blocks) = pixel_stats(&ed.doc.layer().img);
+    l.check(n > 20 && soft == 0, format!("пиксель-арт: линия из целых пикселей, без полупрозрачных краёв (пикселей {n}, полупрозрачных {soft})"));
+    if perfect {
+        l.check(corners == 0 && blocks == 0, format!("«пиксель-идеальная» линия: на изгибах нет лишних уголков (уголков {corners}, блоков 2×2 {blocks})"));
+        ed.undo();
+        let empty = ed.doc.layer().img.content_bounds().is_none();
+        ed.redo();
+        l.check(empty, "отмена пиксельного штриха");
+    } else {
+        l.check(corners > 0, format!("без «пиксель-идеального» режима на изгибах есть уголки ({corners}) — режим что-то исправляет"));
+    }
+}
+
+fn pixel_thick_check(a: &mut App, l: &mut AutoLog) {
+    let ed = a.ed.as_ref().unwrap();
+    let img = &ed.doc.layer().img;
+    let (n, soft, _, _) = pixel_stats(img);
+    let b = img.content_bounds();
+    l.check(soft == 0 && b.map_or(false, |b| b.h == 3 && b.w >= 10) && n == b.map_or(0, |b| (b.w * b.h) as usize), format!("пиксельная кисть 3 px: ровная полоса высотой 3 пикселя ({b:?}, пикселей {n})"));
+    a.sh.prefs.pixel_brush = 1;
+}
+
+/// Наведение пера: курсор редактора там, куда наведено (доли области просмотра).
+fn hover_check(a: &App, l: &mut AutoLog, at: (f32, f32), what: &str) {
+    let want = canvas_pts(a, &[at])[0];
+    let got = a.ed.as_ref().and_then(|e| e.hover);
+    l.check(got.map_or(false, |g| (g - want).length() < 1.5), format!("перо над экраном ({what}): контур кисти под пером ({got:?} ≈ {want:?})"));
+}
+
+/// Слой: слева серый (100), справа почти такой же (104) — заливка с допуском 0 зальёт только левую часть.
+fn pixel_fill_setup(a: &mut App) {
+    let ed = a.ed.as_mut().unwrap();
+    ed.layer_add();
+    fill_rect(ed, 0, 0, 16, 32, [100, 100, 100]);
+    fill_rect(ed, 16, 0, 32, 32, [104, 104, 104]);
+    ed.set_tool(Tool::Fill);
+    a.sh.colors.set([230, 60, 60]);
+}
+
+fn pixel_fill_check(a: &mut App, l: &mut AutoLog) {
+    let ed = a.ed.as_mut().unwrap();
+    let img = &ed.doc.layer().img;
+    let px = |x: usize, y: usize| { let i = img.idx(x, y); [img.px[i], img.px[i + 1], img.px[i + 2], img.px[i + 3]] };
+    l.check(px(3, 3) == [230, 60, 60, 255] && px(15, 30) == [230, 60, 60, 255] && px(16, 3) == [104, 104, 104, 255], format!("пиксель-арт: заливка точно по цвету, соседний оттенок не залит ({:?} / {:?})", px(3, 3), px(16, 3)));
+    ed.layer_add();
+    ed.set_tool(Tool::Shapes);
+    ed.shape_kind = crate::editor::ShapeKind::Rect;
+    ed.shape_fill = false;
+    ed.shape_stroke = true;
+    ed.shape_width = 1.0;
+    a.sh.colors.set([20, 120, 220]);
+}
+
+/// Прямоугольник шириной 1 px: ровно рамка от клетки под началом до клетки под концом, без сглаживания.
+fn pixel_rect_check(a: &mut App, l: &mut AutoLog, from: (f32, f32), to: (f32, f32)) {
+    let ed = a.ed.as_ref().unwrap();
+    let pts = canvas_pts(a, &[from, to]);
+    let (p0, p1) = (ed.view.to_doc(pts[0]), ed.view.to_doc(pts[1]));
+    let (x0, y0, x1, y1) = (p0.0.floor() as i32, p0.1.floor() as i32, p1.0.floor() as i32, p1.1.floor() as i32);
+    let img = &ed.doc.layer().img;
+    let (n, soft, _, _) = pixel_stats(img);
+    let want = (2 * ((x1 - x0 + 1) + (y1 - y0 + 1)) - 4) as usize;
+    let b = img.content_bounds();
+    let ok_box = b.map_or(false, |b| b.x == x0 && b.y == y0 && b.right() == x1 + 1 && b.bottom() == y1 + 1);
+    l.check(soft == 0 && n == want && ok_box, format!("пиксель-арт: прямоугольник 1 px — ровная рамка по клеткам ({x0},{y0})–({x1},{y1}): пикселей {n} из {want}, полупрозрачных {soft}"));
+}
+
+/// Увеличение «по ближайшему пикселю» и экспорт ×8 без размытия.
+fn pixel_export_check(a: &mut App, l: &mut AutoLog) {
+    let mut s = Img::new(2, 1);
+    s.px.copy_from_slice(&[255, 0, 0, 255, 0, 0, 255, 255]);
+    let r = s.resize_nearest(8, 4);
+    let ok = (0..4).all(|y| (0..8).all(|x| { let i = r.idx(x, y); r.px[i..i + 4] == if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] } }));
+    l.check(ok, "увеличение «по ближайшему пикселю»: без промежуточных цветов");
+    let dir = std::env::var_os("MAZOK_AUTOTEST").map(PathBuf::from).unwrap_or_default().join("export-pixel");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let (old_dir, old_q) = (a.sh.prefs.export_dir.clone(), a.sh.prefs.quick_export);
+    a.sh.prefs.export_dir = dir.to_string_lossy().to_string();
+    a.sh.prefs.quick_export = true;
+    a.export_with(&crate::app::ExportOpts { kind: "png", scale: 800.0, ..Default::default() }, false);
+    a.sh.prefs.export_dir = old_dir;
+    a.sh.prefs.quick_export = old_q;
+    let file = std::fs::read_dir(&dir).ok().and_then(|mut rd| rd.find_map(|e| e.ok())).and_then(|e| std::fs::read(e.path()).ok());
+    let ed = a.ed.as_ref().unwrap();
+    let flat = doc::flatten_export(&ed.doc, true);
+    match file.and_then(|b| formats::decode_image(&b).ok()) {
+        Some(img) => {
+            let same = img.w == 256 && img.h == 256 && (0..256).step_by(3).all(|y| (0..256).step_by(3).all(|x| { let (i, j) = (img.idx(x, y), flat.idx(x / 8, y / 8)); img.px[i..i + 4] == flat.px[j..j + 4] }));
+            l.check(same, format!("экспорт пиксель-арта ×8: {}×{}, каждый пиксель — чёткий квадрат 8×8", img.w, img.h));
+        }
+        None => l.check(false, "экспорт пиксель-арта ×8: файл не найден"),
+    }
+}
+
 static DRAG_IDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Холст с четырьмя слоями A, B, C, D (снизу вверх) и открытая панель слоёв.

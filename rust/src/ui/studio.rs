@@ -104,7 +104,8 @@ fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
     let safe = cx.st.safe;
     let bottom = screen.bottom() - safe[1];
     let avail = (bottom - top - 16.0).max(220.0);
-    let fixed = 34.0 + 8.0 + 2.0 * 38.0 + 30.0;
+    let pixel_mode = cx.ed.pixel_mode();
+    let fixed = 34.0 + 8.0 + 2.0 * 38.0 + 30.0 + if pixel_mode { 42.0 } else { 0.0 };
     let size_h = ((avail - fixed) * 0.56).clamp(70.0, 250.0);
     let op_h = ((avail - fixed) * 0.44).clamp(60.0, 200.0);
     let h = size_h + op_h + fixed;
@@ -117,10 +118,12 @@ fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let view_s = cx.ed.view.s;
+                // пиксель-арт: ползунок размера — размер пиксельной кисти 1…64 px
+                let pix = cx.ed.pixel_size(cx.sh);
                 let ts = cx.ed.tool_state_mut(cx.sh);
-                let mut size = ts.size;
+                let mut size = match pix { Some(n) => ((n - 1) as f32 / 63.0).sqrt(), None => ts.size };
                 let mut op = ts.opacity;
-                let r = vslider(ui, &mut size, 0.0, 1.0, Vec2::new(w - 12.0, size_h), "Размер кисти");
+                let r = vslider(ui, &mut size, 0.0, 1.0, Vec2::new(w - 12.0, size_h), if pix.is_some() { "Размер пиксельной кисти" } else { "Размер кисти" });
                 let r_size = r.rect;
                 let size_active = r.dragged() || r.is_pointer_button_down_on();
                 let (sq, sresp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
@@ -134,15 +137,22 @@ fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
                 ui.add_space(4.0);
                 if icon_btn(ui, "undo", false, "Отменить (Ctrl+Z, касание двумя пальцами)", Vec2::splat(36.0)).clicked() { cx.acts.push("undo"); }
                 if icon_btn(ui, "redo", false, "Повторить (Ctrl+Shift+Z, касание тремя пальцами)", Vec2::splat(36.0)).clicked() { cx.acts.push("redo"); }
+                if pixel_mode && icon_btn(ui, "pixgrid", cx.ed.doc.guide.pixel_grid, "Сетка пикселей (видна при увеличении)", Vec2::splat(36.0)).clicked() { cx.acts.push("pixel_grid"); }
                 let ts = cx.ed.tool_state_mut(cx.sh);
-                ts.size = size;
+                if pix.is_none() { ts.size = size; }
                 ts.opacity = op;
                 let id = ts.brush_id.clone();
-                let b = cx.sh.brushes.get(&id);
-                let px = brush::size_px(b, size);
+                let px = match pix {
+                    Some(_) => {
+                        let n = 1 + (size * size * 63.0).round() as u32;
+                        if cx.ed.tool == Tool::Eraser { cx.sh.prefs.pixel_eraser = n; } else { cx.sh.prefs.pixel_brush = n; }
+                        n as f32
+                    }
+                    None => brush::size_px(cx.sh.brushes.get(&id), size),
+                };
                 let right = cx.sh.prefs.sidebar_right;
                 let anchor = |r: Rect| if right { Pos2::new(r.left() - 160.0, r.center().y - 70.0) } else { Pos2::new(r.right() + 22.0, r.center().y - 70.0) };
-                if size_active { bubble = Some(((px * view_s).clamp(2.0, 120.0), format!("{:.1} px", px), anchor(r_size))); }
+                if size_active { bubble = Some(((px * view_s).clamp(2.0, 120.0), if pix.is_some() { format!("{px:.0} px") } else { format!("{:.1} px", px) }, anchor(r_size))); }
                 if op_active { bubble = Some((0.0, format!("{:.0} %", op * 100.0), anchor(r_op))); }
             });
         });
@@ -168,6 +178,12 @@ fn side_bar(ctx: &egui::Context, cx: &mut Cx, top: f32) {
 
 /// Быстрые настройки кисти над библиотекой: режим, нажим, стабилизатор.
 fn brush_quick(ui: &mut Ui, cx: &mut Cx) {
+    if cx.ed.pixel_size(cx.sh).is_some() {
+        // пиксель-арт: карандаш и ластик рисуют целыми пикселями — у них свои настройки
+        ui.label(egui::RichText::new("Пиксель-арт: кисть ставит целые пиксели").color(ACCENT));
+        ui.horizontal_wrapped(|ui| pixel_options(ui, cx));
+        return;
+    }
     let tool = cx.ed.tool;
     let ts = cx.ed.tool_state_mut(cx.sh).clone();
     let mut b = cx.sh.brushes.get(&ts.brush_id).clone();

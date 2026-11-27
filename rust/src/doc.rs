@@ -280,11 +280,15 @@ pub struct Guide {
     pub cy: f32,
     pub grid: bool,
     pub grid_size: f32,
+    /// Режим пиксель-арта: пиксельный карандаш и ластик, заливка и фигуры без сглаживания.
+    pub pixel: bool,
+    /// Сетка по границам пикселей (видна при увеличении).
+    pub pixel_grid: bool,
 }
 
 impl Default for Guide {
     fn default() -> Self {
-        Guide { sym: "none".into(), segments: 6, rotational: true, cx: 0.0, cy: 0.0, grid: false, grid_size: 100.0 }
+        Guide { sym: "none".into(), segments: 6, rotational: true, cx: 0.0, cy: 0.0, grid: false, grid_size: 100.0, pixel: false, pixel_grid: false }
     }
 }
 

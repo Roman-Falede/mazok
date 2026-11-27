@@ -1,6 +1,6 @@
 [package]
 name = "mazok"
-version = "3.5.0"
+version = "3.6.0"
 edition = "2021"
 description = "Мазок — приложение для цифрового рисования (Rust)"
 license = "MIT"
@@ -55,3 +55,5 @@ opt-level = 3
 # egui_glow с точными (highp) шейдерами: иначе на Android буквы обрезаются и сдвигаются (см. patches/egui_glow/MAZOK-PATCH.md)
 [patch.crates-io]
 egui_glow = { path = "patches/egui_glow" }
+# winit с наведением стилуса на Android: контур кисти до касания (см. patches/winit/MAZOK-PATCH.md)
+winit = { path = "patches/winit" }

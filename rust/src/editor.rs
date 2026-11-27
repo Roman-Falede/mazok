@@ -133,6 +133,8 @@ enum Active {
         picks: Vec<Option<Pick>>,
         clone_src: Option<Arc<Img>>,
         clone_off: (f32, f32),
+        /// Пиксельный карандаш (режим пиксель-арта) вместо отпечатков кисти.
+        pix: Option<PixelPen>,
     },
     Pick,
     Fill { src: Img, x: usize, y: usize, sx0: f32, base: f32, tol: f32, color: [u8; 3], prev: Option<Rect>, total: Option<Rect>, pending: bool },
@@ -144,6 +146,57 @@ enum Active {
     VErase { list: Vec<VStroke>, before: Option<vector::VList>, last: (f32, f32), r: f32, total: Option<Rect>, mode: EraseMode, changed: bool },
     Pan { last: Pos2 },
     Zoom { start: Pos2, last_x: f32, moved: bool, out: bool },
+}
+
+/// Пиксельный карандаш: целые пиксели без сглаживания, линии по Брезенхэму,
+/// «пиксель-идеальные» линии (без лишних пикселей на изгибах) для размера 1.
+struct PixelPen {
+    size: i32,
+    round: bool,
+    perfect: bool,
+    color: [f32; 3],
+    mirrors: Vec<Mirror>,
+    last: Option<(i32, i32)>,
+    /// Последние поставленные точки — для пиксель-идеальных линий.
+    trail: Vec<(i32, i32)>,
+    /// Сколько раз закрашен пиксель за штрих (исправление угла не стирает пересечения).
+    hits: HashMap<(i32, i32), u16>,
+}
+
+/// Клетки пиксельной кисти размера n с центром в клетке (0, 0).
+pub fn pixel_cells(n: i32, round: bool) -> Vec<(i32, i32)> {
+    let n = n.clamp(1, 256);
+    let o = (n - 1) / 2;
+    let c = (n - 1) as f32 / 2.0;
+    let r = n as f32 / 2.0 - 0.25;
+    let mut v = Vec::with_capacity((n * n) as usize);
+    for dy in 0..n {
+        for dx in 0..n {
+            if round && n > 2 {
+                let (fx, fy) = (dx as f32 - c, dy as f32 - c);
+                if fx * fx + fy * fy > r * r { continue; }
+            }
+            v.push((dx - o, dy - o));
+        }
+    }
+    v
+}
+
+/// Целые точки отрезка (Брезенхэм), включая концы.
+pub fn bresenham(a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
+    let (mut x, mut y) = a;
+    let (dx, dy) = ((b.0 - a.0).abs(), -(b.1 - a.1).abs());
+    let (sx, sy) = (if a.0 < b.0 { 1 } else { -1 }, if a.1 < b.1 { 1 } else { -1 });
+    let mut err = dx + dy;
+    let mut out = Vec::with_capacity((dx - dy + 1) as usize);
+    loop {
+        out.push((x, y));
+        if (x, y) == b || out.len() > 100_000 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x += sx; }
+        if e2 <= dx { err += dx; y += sy; }
+    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -247,6 +300,10 @@ pub struct Editor {
     pub block_input: bool,
     /// Последний нажим пера (если перо его передаёт).
     last_force: Option<f32>,
+    /// Перо над экраном без касания (Windows присылает это как движение касания без начала): место и время.
+    pen_hover: Option<(Pos2, f64)>,
+    /// Текстура формы отпечатка для контура кисти под курсором: (форма, текстура).
+    tip_tex: Option<(String, egui::TextureHandle)>,
 }
 
 /* ---------- приёмники отпечатков ---------- */
@@ -536,6 +593,8 @@ impl Editor {
             multi: vec![],
             block_input: false,
             last_force: None,
+            pen_hover: None,
+            tip_tex: None,
             doc,
         };
         e.invalidate_all();
@@ -561,10 +620,50 @@ impl Editor {
     }
     pub fn fit(&mut self) {
         if self.canvas_rect.is_positive() {
-            let r = self.doc.sheet_rect();
-            self.view.fit_rect(r, self.canvas_rect.shrink(12.0));
+            let area = self.canvas_rect.shrink(12.0);
+            self.fit_into(area);
         } else {
             self.fitted = false;
+        }
+    }
+
+    /// Вписать лист в область; в режиме пиксель-арта — с целым масштабом (все пиксели одного размера).
+    fn fit_into(&mut self, area: egui::Rect) {
+        let r = self.doc.sheet_rect();
+        self.view.fit_rect(r, area);
+        if self.pixel_mode() && self.view.s > 1.0 && self.view.r == 0.0 {
+            let k = self.view.s.floor() / self.view.s;
+            self.view.zoom_at(area.center(), k);
+            self.view.ox = self.view.ox.round();
+            self.view.oy = self.view.oy.round();
+        }
+    }
+
+    /* ---------- режим пиксель-арта ---------- */
+
+    /// Режим пиксель-арта: пиксельный карандаш и ластик, заливка и фигуры без сглаживания, чёткие пиксели.
+    pub fn pixel_mode(&self) -> bool {
+        self.doc.guide.pixel
+    }
+
+    /// Включить или выключить режим пиксель-арта для рисунка (вместе с ним — пиксельную сетку).
+    pub fn set_pixel_mode(&mut self, on: bool) {
+        if self.doc.guide.pixel == on { return; }
+        self.doc.guide.pixel = on;
+        self.doc.guide.pixel_grid = on;
+        self.tex_nearest = !on; // перезагрузить текстуру холста с нужной фильтрацией
+        self.mark_changed();
+        self.fit();
+        self.toast(if on { "Режим пиксель-арта: пиксельный карандаш, заливка и фигуры без сглаживания, сетка пикселей" } else { "Режим пиксель-арта выключен" });
+    }
+
+    /// Размер пиксельной кисти (в пикселях) для текущего инструмента, если он рисует пикселями.
+    pub fn pixel_size(&self, sh: &Shared) -> Option<i32> {
+        if !self.pixel_mode() { return None; }
+        match self.tool {
+            Tool::Brush => Some(sh.prefs.pixel_brush.clamp(1, 64) as i32),
+            Tool::Eraser if !self.doc.layer().is_vector() || self.editing_mask() => Some(sh.prefs.pixel_eraser.clamp(1, 64) as i32),
+            _ => None,
         }
     }
 
@@ -576,7 +675,8 @@ impl Editor {
             doc::render(&self.doc, &mut self.comp, r, ov);
             self.tex_dirty = util::union_opt(self.tex_dirty, r);
         }
-        let nearest = self.view.s >= 2.0;
+        // при увеличении и в режиме пиксель-арта — чёткие пиксели без размытия
+        let nearest = self.view.s >= 2.0 || self.pixel_mode();
         let opts = if nearest { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)) };
         let size = [self.doc.w, self.doc.h];
         let need_full = self.tex.as_ref().map_or(true, |t| t.size() != size) || nearest != self.tex_nearest;
@@ -624,7 +724,7 @@ impl Editor {
         let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.canvas_rect = rect;
         if !self.fitted && rect.is_positive() {
-            self.view.fit_rect(self.doc.sheet_rect(), rect.shrink(12.0));
+            self.fit_into(rect.shrink(12.0));
             self.fitted = true;
         }
         self.handle_input(ui, rect, sh);
@@ -680,6 +780,7 @@ impl Editor {
             painter.add(egui::Shape::closed_line(rim, egui::Stroke::new(1.0, Color32::from_white_alpha(170))));
         }
         self.draw_guides(&painter);
+        self.prepare_tip_tex(&ctx, sh);
         self.draw_overlay(&painter, sh);
         if self.active.is_some() || self.xform.is_some() || self.filter.as_ref().map_or(false, |f| f.dirty) {
             ctx.request_repaint();
@@ -691,6 +792,23 @@ impl Editor {
         let col = Color32::from_rgba_unmultiplied(58, 160, 255, 150);
         let st = egui::Stroke::new(1.0, col);
         let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+        // сетка пикселей: видна, когда пиксель на экране не меньше 6 точек; рисуется только видимая часть
+        if g.pixel_grid && self.view.s >= 6.0 {
+            let r = self.canvas_rect;
+            let cs = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|q| self.view.to_doc(q));
+            let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            for (x, y) in cs { x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); }
+            let (x0, x1) = (x0.floor().max(0.0), x1.ceil().min(w));
+            let (y0, y1) = (y0.floor().max(0.0), y1.ceil().min(h));
+            if x1 > x0 && y1 > y0 && (x1 - x0) + (y1 - y0) <= 4000.0 {
+                let a = (55.0 + ((self.view.s - 6.0) / 12.0).clamp(0.0, 1.0) * 60.0) as u8;
+                let gs = egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 110, 125, a));
+                let mut x = x0;
+                while x <= x1 { p.line_segment([self.view.to_screen(x, y0), self.view.to_screen(x, y1)], gs); x += 1.0; }
+                let mut y = y0;
+                while y <= y1 { p.line_segment([self.view.to_screen(x0, y), self.view.to_screen(x1, y)], gs); y += 1.0; }
+            }
+        }
         if g.grid && g.grid_size * self.view.s >= 4.0 {
             let mut x = 0.0;
             while x <= w {
@@ -720,6 +838,26 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// Текстура формы отпечатка текущей кисти (для контура под курсором); у круглых кистей хватает круга.
+    fn prepare_tip_tex(&mut self, ctx: &egui::Context, sh: &Shared) {
+        if !self.tool.is_paint() || self.hover.is_none() || self.pixel_size(sh).is_some() { return; }
+        let ts = tool_state(sh, self.tool);
+        let b = sh.brushes.get(&ts.brush_id);
+        if b.shape == "round" { return; }
+        let key = format!("{}:{:.2}", b.shape, b.hardness);
+        if self.tip_tex.as_ref().map_or(false, |(k, _)| *k == key) { return; }
+        let t = brush::tip(&b.shape, b.hardness, 128);
+        let n = t.size;
+        if n == 0 || t.a.len() < n * n { return; }
+        let mut px = vec![0u8; n * n * 4];
+        for (i, a) in t.a.iter().take(n * n).enumerate() {
+            let v = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+            px[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, v]);
+        }
+        let img = egui::ColorImage::from_rgba_premultiplied([n, n], &px);
+        self.tip_tex = Some((key, ctx.load_texture("mazok-tip", img, egui::TextureOptions::LINEAR)));
     }
 
     fn draw_overlay(&self, p: &egui::Painter, sh: &Shared) {
@@ -815,11 +953,53 @@ impl Editor {
         }
         if let Some(h) = self.hover {
             if sh.prefs.cursor && self.tool.is_paint() && self.active.is_none() && self.canvas_rect.contains(h) {
-                let ts = tool_state(sh, self.tool);
-                let b = sh.brushes.get(&ts.brush_id);
-                let r = (brush::size_px(b, ts.size) * self.view.s / 2.0).max(1.5);
-                p.circle_stroke(h, r + 0.75, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
-                p.circle_stroke(h, r - 0.25, egui::Stroke::new(1.0, Color32::from_white_alpha(220)));
+                let fg = sh.colors.fg;
+                let erase = self.tool == Tool::Eraser;
+                if let Some(n) = self.pixel_size(sh) {
+                    // пиксельная кисть: ровно те клетки, которые она закрасит
+                    let (dx, dy) = v.to_doc(h);
+                    let (cx, cy) = (dx.floor() as i32, dy.floor() as i32);
+                    let fill = if erase { Color32::from_white_alpha(70) } else { Color32::from_rgba_unmultiplied(fg[0], fg[1], fg[2], 170) };
+                    let cell = |x: i32, y: i32, w: i32| [(x, y), (x + w, y), (x + w, y + w), (x, y + w)].map(|(a, b)| v.to_screen(a as f32, b as f32));
+                    if n <= 24 {
+                        for (ox, oy) in pixel_cells(n, sh.prefs.pixel_round) {
+                            p.add(egui::Shape::convex_polygon(cell(cx + ox, cy + oy, 1).to_vec(), fill, egui::Stroke::NONE));
+                        }
+                    }
+                    let o = (n - 1) / 2;
+                    let frame = cell(cx - o, cy - o, n).to_vec();
+                    p.add(egui::Shape::closed_line(frame.clone(), egui::Stroke::new(2.0, Color32::from_black_alpha(160))));
+                    p.add(egui::Shape::closed_line(frame, egui::Stroke::new(1.0, Color32::from_white_alpha(230))));
+                } else {
+                    let ts = tool_state(sh, self.tool);
+                    let b = sh.brushes.get(&ts.brush_id);
+                    let d = brush::size_px(b, ts.size) * self.view.s;
+                    let r = (d / 2.0).max(1.5);
+                    // форма отпечатка (у некруглых кистей): как кисть ляжет на холст
+                    if let Some((key, tex)) = &self.tip_tex {
+                        if key.starts_with(&format!("{}:", b.shape)) && b.shape != "round" && d >= 6.0 {
+                            let (hx, hy) = v.to_doc(h);
+                            let half = brush::size_px(b, ts.size) / 2.0;
+                            let (ca, sa) = (b.angle.to_radians().cos(), b.angle.to_radians().sin());
+                            let rnd = b.roundness.clamp(0.05, 1.0);
+                            let corners = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(ux, uy)| {
+                                let (lx, ly) = (ux * half, uy * half * rnd);
+                                v.to_screen(hx + lx * ca - ly * sa, hy + lx * sa + ly * ca)
+                            });
+                            let tint = if erase { Color32::from_white_alpha(120) } else { Color32::from_rgba_unmultiplied(fg[0], fg[1], fg[2], 140) };
+                            quad_tint(p, tex.id(), corners, [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)], tint);
+                        }
+                    }
+                    p.circle_stroke(h, r + 0.75, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
+                    p.circle_stroke(h, r - 0.25, egui::Stroke::new(1.0, Color32::from_white_alpha(220)));
+                    // ластик — пунктирный крестик в центре, чтобы не спутать с кистью
+                    if erase && r > 6.0 {
+                        for s in [egui::Stroke::new(3.0, Color32::from_black_alpha(150)), egui::Stroke::new(1.0, Color32::from_white_alpha(230))] {
+                            p.line_segment([h - Vec2::new(4.0, 0.0), h + Vec2::new(4.0, 0.0)], s);
+                            p.line_segment([h - Vec2::new(0.0, 4.0), h + Vec2::new(0.0, 4.0)], s);
+                        }
+                    }
+                }
             }
         }
     }
@@ -856,6 +1036,7 @@ impl Editor {
                     let id = id.0;
                     match phase {
                         egui::TouchPhase::Start => {
+                            self.pen_hover = None;
                             if !over(pos) && self.touches.is_empty() {
                                 continue;
                             }
@@ -892,6 +1073,9 @@ impl Editor {
                                     self.view.oy += d.y;
                                     if let Some(g) = &mut self.gesture { g.1 += d.length(); if g.1 > 10.0 { g.2 = true; } }
                                 }
+                            } else if self.touches.is_empty() && self.draw_touch.is_none() {
+                                // движение без касания: перо над экраном (так его присылает Windows) — для контура кисти
+                                self.pen_hover = Some((pos, self.now));
                             }
                         }
                         egui::TouchPhase::End | egui::TouchPhase::Cancel => {
@@ -940,12 +1124,21 @@ impl Editor {
                     if !self.touches.is_empty() || self.draw_touch.is_some() {
                         continue;
                     }
+                    self.pen_hover = None;
                     if self.active.is_some() {
                         self.moved(pos, 1.0, mods, sh);
                     }
                 }
+                egui::Event::PointerGone => { self.pen_hover = None; }
                 _ => {}
             }
+        }
+        // перо над экраном: показываем контур кисти, пока приходят его движения
+        let pen = self.pen_hover.filter(|(_, t)| self.now - *t < 0.8).map(|(p, _)| p);
+        if pen.is_none() { self.pen_hover = None; }
+        if let Some(p) = pen.filter(|p| over(*p)) {
+            self.hover = Some(p);
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         if let Some(mt) = multi {
             if mt.num_touches >= 2 && self.touches.len() >= 2 {
@@ -1127,6 +1320,9 @@ impl Editor {
                     if op == SelOp::Replace && self.sel.is_some() { self.select_none(); }
                     return;
                 }
+                // пиксель-арт: выделение по целым клеткам, без полупрозрачного края
+                let px = self.doc.guide.pixel;
+                let (x0, y0, x1, y1) = if px { (x0.min(x1).floor(), y0.min(y1).floor(), x0.max(x1).floor() + 1.0, y0.max(y1).floor() + 1.0) } else { (x0, y0, x1, y1) };
                 let poly: Vec<(f32, f32)> = match self.sel_shape {
                     SelShape::Lasso => { if pts.len() < 3 { return; } pts }
                     SelShape::Ellipse => raster::ellipse_poly((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0).abs() / 2.0, (y1 - y0).abs() / 2.0),
@@ -1134,7 +1330,7 @@ impl Editor {
                 };
                 let mut m = vec![0u8; self.doc.w * self.doc.h];
                 let w = self.doc.w;
-                raster::fill_polys(self.doc.w, self.doc.h, &[poly.clone()], false, |x, y, c| m[y * w + x] = (c * 255.0) as u8);
+                raster::fill_polys(self.doc.w, self.doc.h, &[poly.clone()], false, |x, y, c| m[y * w + x] = if px { if c >= 0.5 { 255 } else { 0 } } else { (c * 255.0) as u8 });
                 self.apply_selection(m, op, Some(poly), "Выделение");
             }
             Active::Wand { preview, op, tol, .. } => {
@@ -1261,15 +1457,87 @@ impl Editor {
             clone_off = self.clone_off.unwrap();
             clone_src = Some(self.doc.layer().img.clone());
         }
+        // режим пиксель-арта: карандаш и ластик ставят целые пиксели (без нажима, сглаживания и текстуры)
+        let pix = match (self.pixel_size(sh), mode) {
+            (Some(n), PaintMode::Paint | PaintMode::Erase) if !is_vec => Some(PixelPen {
+                size: n,
+                round: sh.prefs.pixel_round,
+                perfect: sh.prefs.pixel_perfect && n == 1,
+                color: sh.colors.fg.map(|v| v as f32 / 255.0),
+                mirrors: self.mirrors(),
+                last: None,
+                trail: vec![],
+                hits: HashMap::new(),
+            }),
+            _ => None,
+        };
+        let grain = if pix.is_some() { None } else { grain };
         let mut stroke = Stroke::new(b, size, sh.colors.fg, self.mirrors(), sh.prefs.pressure_gamma, sh.prefs.streamline_mul);
-        if mode != PaintMode::Smudge {
+        if mode != PaintMode::Smudge && pix.is_none() {
             stroke.lazy_r = sh.prefs.stabilizer.clamp(0.0, 1.0) * 70.0 / self.view.s.max(0.01);
         }
+        let is_pix = pix.is_some();
         self.active = Some(Active::Paint {
             mode, stroke, total: None, opacity: ts.opacity, grain, blend, start: pos, started: false, shape: None,
-            qs_anchor: pos, qs_t: self.now, picks: vec![], clone_src, clone_off,
+            qs_anchor: pos, qs_t: self.now, picks: vec![], clone_src, clone_off, pix,
         });
-        self.paint_feed(|s, sink| s.add(x, y, pressure, 0.0, sink));
+        if is_pix { self.pixel_to(x, y); } else { self.paint_feed(|s, sink| s.add(x, y, pressure, 0.0, sink)); }
+    }
+
+    /// Пиксельный карандаш: провести линию из прошлой клетки в клетку под (x, y).
+    fn pixel_to(&mut self, x: f32, y: f32) {
+        let (w, h) = (self.doc.w as i32, self.doc.h as i32);
+        let Editor { active, buffer, .. } = self;
+        let Some(Active::Paint { pix: Some(pen), stroke, .. }) = active else { return };
+        let cell = (x.floor() as i32, y.floor() as i32);
+        if pen.last == Some(cell) { return; }
+        let pts = match pen.last { Some(l) => bresenham(l, cell).into_iter().skip(1).collect::<Vec<_>>(), None => vec![cell] };
+        pen.last = Some(cell);
+        let cells = pixel_cells(pen.size, pen.round);
+        let col = pen.color.map(|c| (c * 65535.0).round() as u16);
+        let mut dirty: Option<Rect> = None;
+        // клетка p с копиями по симметрии
+        let images = |pen: &PixelPen, p: (i32, i32)| -> Vec<(i32, i32)> {
+            if pen.mirrors.is_empty() { return vec![p]; }
+            let (fx, fy) = (p.0 as f32 + 0.5, p.1 as f32 + 0.5);
+            let mut v: Vec<(i32, i32)> = pen.mirrors.iter().map(|m| {
+                let (dx, dy) = (fx - m.cx, fy - m.cy);
+                ((m.cx + m.a * dx + m.b * dy).floor() as i32, (m.cy + m.c * dx + m.d * dy).floor() as i32)
+            }).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let put = |pen: &mut PixelPen, buf: &mut [u16], p: (i32, i32), on: bool, dirty: &mut Option<Rect>| {
+            for q in images(&*pen, p) {
+                for (dx, dy) in &cells {
+                    let (cx, cy) = (q.0 + dx, q.1 + dy);
+                    if cx < 0 || cy < 0 || cx >= w || cy >= h { continue; }
+                    let hit = pen.hits.entry((cx, cy)).or_insert(0);
+                    if on { *hit += 1; } else { *hit = hit.saturating_sub(1); }
+                    let i = (cy as usize * w as usize + cx as usize) * 4;
+                    if *hit > 0 { buf[i..i + 4].copy_from_slice(&[col[0], col[1], col[2], 65535]); } else { buf[i..i + 4].fill(0); }
+                    *dirty = util::union_opt(*dirty, Rect::new(cx, cy, 1, 1));
+                }
+            }
+        };
+        for p in pts {
+            put(pen, buffer, p, true, &mut dirty);
+            if pen.perfect {
+                pen.trail.push(p);
+                let n = pen.trail.len();
+                if n >= 3 {
+                    let (a, b, c) = (pen.trail[n - 3], pen.trail[n - 2], pen.trail[n - 1]);
+                    // b — «уголок» между диагональными соседями a и c: убрать его
+                    if (a.0 == b.0 || a.1 == b.1) && (c.0 == b.0 || c.1 == b.1) && a.0 != c.0 && a.1 != c.1 {
+                        put(pen, buffer, b, false, &mut dirty);
+                        pen.trail.remove(n - 2);
+                    }
+                }
+                if pen.trail.len() > 8 { pen.trail.drain(..pen.trail.len() - 4); }
+            }
+        }
+        if let Some(d) = dirty { stroke.dirty = util::union_opt(stroke.dirty, d); }
     }
 
     /// Выполнить действие со штрихом с подходящим приёмником отпечатков.
@@ -1301,6 +1569,10 @@ impl Editor {
     }
 
     fn paint_move(&mut self, x: f32, y: f32, pressure: f32, pos: Pos2, _sh: &mut Shared) {
+        if matches!(&self.active, Some(Active::Paint { pix: Some(_), .. })) {
+            self.pixel_to(x, y);
+            return;
+        }
         let now = self.now;
         let mut line_from = None;
         if let Some(Active::Paint { start, started, shape, qs_anchor, qs_t, stroke, .. }) = &mut self.active {
@@ -1340,12 +1612,13 @@ impl Editor {
     }
 
     fn paint_end(&mut self, sh: &mut Shared) {
-        let (needs_taper, has_shape, mode) = match &self.active {
-            Some(Active::Paint { stroke, shape, mode, .. }) => (stroke.b.taper_end > 0.0 && stroke.pts.len() > 1, shape.is_some(), *mode),
+        let (needs_taper, has_shape, mode, is_pix) = match &self.active {
+            Some(Active::Paint { stroke, shape, mode, pix, .. }) => (stroke.b.taper_end > 0.0 && stroke.pts.len() > 1, shape.is_some(), *mode, pix.is_some()),
             _ => return,
         };
         let post = sh.prefs.post_smooth;
-        if !has_shape {
+        // у пиксельного карандаша нет отпечатков: дорисовывать и сглаживать нечего
+        if !has_shape && !is_pix {
             let smooth = post > 0.0 && matches!(mode, PaintMode::Paint | PaintMode::Erase);
             if (needs_taper || smooth) && matches!(mode, PaintMode::Paint | PaintMode::Erase) {
                 self.paint_feed(|s, sink| s.catch_up(sink));
@@ -1613,8 +1886,10 @@ impl Editor {
         if !self.check_layer() || !self.raster_only() { return; }
         let src = if sh.prefs.fill_all_layers && !self.editing_mask() { doc::flatten(&self.doc, false) } else { (**self.target(self.doc.active)).clone() };
         self.begin_work();
-        self.active = Some(Active::Fill { src, x: x as usize, y: y as usize, sx0: sx, base: sh.prefs.fill_tol, tol: sh.prefs.fill_tol, color: sh.colors.fg, prev: None, total: None, pending: true });
-        self.fill_expand = sh.prefs.fill_expand;
+        // пиксель-арт: заливка точно по цвету (допуск 0 — тяните вбок, чтобы увеличить), без расширения краёв
+        let tol = if self.pixel_mode() { 0.0 } else { sh.prefs.fill_tol };
+        self.active = Some(Active::Fill { src, x: x as usize, y: y as usize, sx0: sx, base: tol, tol, color: sh.colors.fg, prev: None, total: None, pending: true });
+        self.fill_expand = if self.pixel_mode() { 0 } else { sh.prefs.fill_expand };
     }
 
     pub fn fill_at(&mut self, pos: Pos2, sh: &mut Shared) {
@@ -1641,10 +1916,12 @@ impl Editor {
         work.img.copy_rect_from(&layer.img, r);
         let alpha_lock = layer.alpha_lock;
         let w = self.doc.w;
+        let hard = self.doc.guide.pixel;
         for yy in b.y as usize..b.bottom() as usize {
             for xx in b.x as usize..b.right() as usize {
                 let mut m = mask[yy * w + xx] as f32 / 255.0;
                 if let Some(s) = &self.sel { m *= s[yy * w + xx] as f32 / 255.0; }
+                if hard { m = if m >= 0.5 { 1.0 } else { 0.0 }; }
                 if m <= 0.0 { continue; }
                 let i = (yy * w + xx) * 4;
                 let px = &mut work.img.px[i..i + 4];
@@ -1722,11 +1999,16 @@ impl Editor {
             }
             Some(Active::Shape { x0, y0, x1, y1, center, pending, .. }) => {
                 *pending = false;
-                let (mut ax, mut ay, bx, by) = (*x0, *y0, *x1, *y1);
-                if *center && self.shape_kind != ShapeKind::Line { ax = *x0 - (bx - *x0); ay = *y0 - (by - *y0); }
-                let (l, t, r, b) = (ax.min(bx), ay.min(by), ax.max(bx), ay.max(by));
+                // пиксель-арт: углы фигуры — по клеткам (обе крайние клетки входят), толщина — целая
+                let pixel = self.doc.guide.pixel;
+                let snap = |v: f32| if pixel { v.floor() } else { v };
+                let (fx0, fy0) = (snap(*x0), snap(*y0));
+                let (mut ax, mut ay, bx, by) = (fx0, fy0, snap(*x1), snap(*y1));
+                if *center && self.shape_kind != ShapeKind::Line { ax = fx0 - (bx - fx0); ay = fy0 - (by - fy0); }
+                let one = if pixel { 1.0 } else { 0.0 };
+                let (l, t, r, b) = (ax.min(bx), ay.min(by), ax.max(bx) + one, ay.max(by) + one);
                 let (cx, cy, rx, ry) = ((l + r) / 2.0, (t + b) / 2.0, (r - l) / 2.0, (b - t) / 2.0);
-                let sw = self.shape_width;
+                let sw = if pixel { self.shape_width.round().max(1.0) } else { self.shape_width };
                 let poly_for = |grow: f32| -> Vec<(f32, f32)> {
                     match self.shape_kind {
                         ShapeKind::Ellipse => raster::ellipse_poly(cx, cy, (rx + grow).max(0.0), (ry + grow).max(0.0)),
@@ -1744,7 +2026,43 @@ impl Editor {
                     }
                 };
                 let mut c = vec![0f32; w * h];
-                if self.shape_kind == ShapeKind::Line {
+                if pixel && self.shape_kind == ShapeKind::Line {
+                    // линия по Брезенхэму квадратной кистью толщиной sw
+                    let cells = pixel_cells(sw as i32, false);
+                    for (px, py) in bresenham((ax as i32, ay as i32), (bx as i32, by as i32)) {
+                        for (dx, dy) in &cells {
+                            let (x, y) = (px + dx, py + dy);
+                            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h { c[y as usize * w + x as usize] = 1.0; }
+                        }
+                    }
+                } else if pixel {
+                    // заливка и контур — только целые пиксели: внутри фигуры или нет
+                    let bin = |poly: Vec<(f32, f32)>| -> Vec<f32> {
+                        let mut m = vec![0f32; w * h];
+                        if poly.len() >= 3 { raster::fill_polys(w, h, &[poly], false, |x, y, v| m[y * w + x] = if v >= 0.5 { 1.0 } else { 0.0 }); }
+                        m
+                    };
+                    let fill = bin(poly_for(0.0));
+                    let stroke_on = self.shape_stroke || !self.shape_fill;
+                    // контур — внутри фигуры: клетки фигуры минус фигура, уменьшенная на толщину
+                    let ring = stroke_on.then(|| {
+                        let thin = (r - l) <= 2.0 * sw || (b - t) <= 2.0 * sw;
+                        let inner = if thin { vec![0f32; w * h] } else { bin(poly_for(-sw)) };
+                        fill.iter().zip(&inner).map(|(a, i)| if *a > 0.0 && *i <= 0.0 { 1.0 } else { 0.0 }).collect::<Vec<f32>>()
+                    });
+                    match (self.shape_fill, ring) {
+                        (true, Some(rg)) => {
+                            let mut cols = vec![[0f32; 4]; w * h];
+                            for i in 0..w * h {
+                                if rg[i] > 0.0 { cols[i] = [bgc[0], bgc[1], bgc[2], 1.0]; } else if fill[i] > 0.0 { cols[i] = [fg[0], fg[1], fg[2], 1.0]; }
+                            }
+                            colors = Some(cols);
+                        }
+                        (true, None) => c = fill,
+                        (false, Some(rg)) => c = rg,
+                        _ => {}
+                    }
+                } else if self.shape_kind == ShapeKind::Line {
                     let r = Rect::from_f(ax.min(bx) - sw, ay.min(by) - sw, ax.max(bx) + sw, ay.max(by) + sw);
                     if let Some(r) = r.clip(w, h) {
                         for y in r.y as usize..r.bottom() as usize {
@@ -1922,7 +2240,7 @@ impl Editor {
             hole.clear();
         }
         let st = XState { cx: b.x as f32 + b.w as f32 / 2.0, cy: b.y as f32 + b.h as f32 / 2.0, w: b.w as f32, h: b.h as f32, rot: 0.0 };
-        self.xform = Some(Xform { layer: li, on_mask: xmask, float, hole, orig, mask: mask_crop, st, init: st, changed: false, smooth: true, uniform: false });
+        self.xform = Some(Xform { layer: li, on_mask: xmask, float, hole, orig, mask: mask_crop, st, init: st, changed: false, smooth: !self.doc.guide.pixel, uniform: false });
         self.xform_render();
         true
     }
@@ -2907,8 +3225,10 @@ impl Editor {
     pub fn resize_canvas(&mut self, nw: usize, nh: usize, ox: i32, oy: i32, scale: bool) {
         let (ow, oh) = (self.doc.w as f32, self.doc.h as f32);
         let aff = if scale { Affine { a: nw as f32 / ow, b: 0.0, c: 0.0, d: nh as f32 / oh, e: 0.0, f: 0.0 } } else { Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: ox as f32, f: oy as f32 } };
+        // в пиксель-арте пиксели при масштабировании не размываются
+        let nearest = self.doc.guide.pixel;
         self.canvas_op(if scale { "Размер изображения" } else { "Размер холста" }, nw, nh, aff, |img| {
-            if scale { img.resize(nw, nh) } else { let mut o = Img::new(nw, nh); o.put(ox, oy, img); o }
+            if scale { if nearest { img.resize_nearest(nw, nh) } else { img.resize(nw, nh) } } else { let mut o = Img::new(nw, nh); o.put(ox, oy, img); o }
         });
     }
     pub fn rotate_canvas(&mut self, cw: bool) {
@@ -3066,9 +3386,13 @@ pub fn tool_state(sh: &Shared, t: Tool) -> &ToolState {
 }
 
 fn quad(p: &egui::Painter, tex: egui::TextureId, c: [Pos2; 4], uv: [Pos2; 4]) {
+    quad_tint(p, tex, c, uv, Color32::WHITE);
+}
+
+fn quad_tint(p: &egui::Painter, tex: egui::TextureId, c: [Pos2; 4], uv: [Pos2; 4], tint: Color32) {
     let mut m = egui::Mesh::with_texture(tex);
     for i in 0..4 {
-        m.vertices.push(egui::epaint::Vertex { pos: c[i], uv: uv[i], color: Color32::WHITE });
+        m.vertices.push(egui::epaint::Vertex { pos: c[i], uv: uv[i], color: tint });
     }
     m.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     p.add(egui::Shape::mesh(m));

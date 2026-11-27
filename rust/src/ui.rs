@@ -28,10 +28,12 @@ pub struct NewCanvas {
     pub transparent: bool,
     /// Поле для рисования вокруг листа (доля размера листа с каждой стороны).
     pub margin: f32,
+    /// Режим пиксель-арта.
+    pub pixel: bool,
 }
 impl Default for NewCanvas {
     fn default() -> Self {
-        NewCanvas { name: "Без названия".into(), w: 2048, h: 2048, bg: [255, 255, 255], transparent: false, margin: 0.15 }
+        NewCanvas { name: "Без названия".into(), w: 2048, h: 2048, bg: [255, 255, 255], transparent: false, margin: 0.15, pixel: false }
     }
 }
 
@@ -192,6 +194,7 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, name: &str, c: Color32) {
         "vector" => { let pts: Vec<(f32, f32)> = (0..=16).map(|i| { let t = i as f32 / 16.0; let u = 1.0 - t; (u * u * 4.0 + 2.0 * u * t * 12.0 + t * t * 20.0, u * u * 19.0 + 2.0 * u * t * 1.0 + t * t * 19.0) }).collect(); line(&pts); for (x, y) in [(4.0, 19.0), (20.0, 19.0)] { p.rect_stroke(Rect::from_center_size(q(x, y), Vec2::splat(4.0 * k)), 0.0, s, egui::StrokeKind::Middle); } p.circle_filled(q(12.0, 10.0), 1.8 * k, c); }
         "photo" => { line(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0), (3.0, 5.0)]); line(&[(3.0, 17.0), (9.0, 11.0), (13.5, 15.5), (16.0, 13.0), (21.0, 18.0)]); circ(15.5, 9.0, 1.7); }
         "grip" => { for y in [8.0, 12.0, 16.0] { line(&[(6.0, y), (18.0, y)]); } }
+        "pixgrid" => { for t in [4.0, 9.33, 14.67, 20.0] { line(&[(t, 4.0), (t, 20.0)]); line(&[(4.0, t), (20.0, t)]); } p.rect_filled(Rect::from_min_size(q(9.33, 9.33), Vec2::splat(5.33 * k)), 0.0, c); }
         _ => { p.circle_filled(r.center(), 2.0 * k, c); }
     }
 }
@@ -410,6 +413,12 @@ fn image_menu(ui: &mut Ui, cx: &mut Cx) {
         }
     });
     ui.separator();
+    let mut px = ed.doc.guide.pixel;
+    if ui.checkbox(&mut px, "Режим пиксель-арта").on_hover_text("Пиксельный карандаш и ластик (целые пиксели, «пиксель-идеальные» линии), заливка, фигуры и выделение без сглаживания, чёткие пиксели и сетка пикселей").changed() {
+        ed.set_pixel_mode(px);
+        ui.close_menu();
+    }
+    ui.separator();
     let sr = ed.doc.sheet_rect();
     if ui.button(if ed.doc.sheet.is_some() { "Размер изображения и листа…" } else { "Размер изображения и холста…" }).clicked() { cx.st.resize = Some(ResizeDlg { w: sr.w as usize, h: sr.h as usize, keep: true, scale: false, anchor: (1, 1) }); ui.close_menu(); }
     ui.menu_button("Поле вокруг листа", |ui| {
@@ -502,8 +511,9 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     }
     ui.separator();
     let g = &mut cx.ed.doc.guide;
+    ui.checkbox(&mut g.pixel_grid, "Пиксельная сетка").on_hover_text("Линии по границам пикселей; видны при сильном увеличении");
     ui.checkbox(&mut g.grid, "Сетка");
-    if g.grid { ui.add(egui::Slider::new(&mut g.grid_size, 4.0..=512.0).text("Шаг сетки")); }
+    if g.grid { ui.add(egui::Slider::new(&mut g.grid_size, 1.0..=512.0).text("Шаг сетки")); }
     ui.label("Симметрия");
     egui::ComboBox::from_id_salt("sym").selected_text(sym_name(&g.sym)).show_ui(ui, |ui| {
         for s in ["none", "vertical", "horizontal", "quadrant", "radial"] { ui.selectable_value(&mut g.sym, s.to_string(), sym_name(s)); }
@@ -527,6 +537,10 @@ fn options_bar(ui: &mut Ui, cx: &mut Cx) {
         ui.label(egui::RichText::new(ed.tool.name()).strong());
         ui.separator();
         match ed.tool {
+            Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Clone if ed.pixel_size(cx.sh).is_some() => {
+                ui.label(egui::RichText::new("Пиксель-арт").color(ACCENT));
+                pixel_options(ui, cx);
+            }
             Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Clone => {
                 let tool = ed.tool;
                 ui.spacing_mut().slider_width = 76.0;
@@ -639,6 +653,32 @@ fn options_bar(ui: &mut Ui, cx: &mut Cx) {
             }
         }
     });
+}
+
+/// Настройки пиксельного карандаша и ластика (режим пиксель-арта).
+fn pixel_options(ui: &mut Ui, cx: &mut Cx) {
+    let erase = cx.ed.tool == Tool::Eraser;
+    {
+        let p = &mut cx.sh.prefs;
+        let v = if erase { &mut p.pixel_eraser } else { &mut p.pixel_brush };
+        ui.label("Размер");
+        ui.add(egui::DragValue::new(v).range(1..=64).suffix(" px").speed(0.15));
+        for n in [1u32, 2, 3, 4, 6, 8] {
+            if ui.selectable_label(*v == n, format!("{n}")).clicked() { *v = n; }
+        }
+    }
+    ui.separator();
+    let p = &mut cx.sh.prefs;
+    ui.selectable_value(&mut p.pixel_round, false, "Квадрат");
+    ui.selectable_value(&mut p.pixel_round, true, "Круг");
+    ui.separator();
+    ui.checkbox(&mut p.pixel_perfect, "Пиксель-идеальные линии").on_hover_text("Без лишних пикселей на изгибах линии (для кисти в 1 пиксель)");
+    ui.separator();
+    let ts = cx.ed.tool_state_mut(cx.sh);
+    ui.label("Непрозр.");
+    ui.add(egui::Slider::new(&mut ts.opacity, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    ui.separator();
+    ui.checkbox(&mut cx.ed.doc.guide.pixel_grid, "Сетка пикселей");
 }
 
 fn vector_erase_modes(ui: &mut Ui, mode: &mut String) {
@@ -1626,23 +1666,41 @@ impl App {
             let mut close = false;
             win("Новый холст").show(ctx, |ui| {
                 ui.horizontal(|ui| { ui.label("Название"); ui.text_edit_singleline(&mut nc.name); });
-                let presets: [(&str, usize, usize); 11] = [("Квадрат", 2048, 2048), ("A4, 300 dpi", 2480, 3508), ("A5, 300 dpi", 1748, 2480), ("Full HD", 1920, 1080), ("4K", 3840, 2160), ("Сторис 9:16", 1080, 1920), ("Пост 4:5", 1080, 1350), ("Экран", 2560, 1600), ("Пиксель-арт", 128, 128), ("Иконка", 512, 512), ("Скетч", 1500, 1500)];
-                egui::Grid::new("presets").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
-                    for (i, (n, w, h)) in presets.iter().enumerate() {
-                        if ui.selectable_label(nc.w == *w && nc.h == *h, format!("{n}\n{w} × {h}")).clicked() { nc.w = *w; nc.h = *h; }
-                        if i % 3 == 2 { ui.end_row(); }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(!nc.pixel, "Обычный холст").clicked() && nc.pixel { nc.pixel = false; nc.w = 2048; nc.h = 2048; }
+                    if ui.selectable_label(nc.pixel, "Пиксель-арт").on_hover_text("Пиксельный карандаш и ластик, «пиксель-идеальные» линии, заливка и фигуры без сглаживания, сетка пикселей").clicked() && !nc.pixel {
+                        nc.pixel = true; nc.w = 32; nc.h = 32; nc.transparent = true; nc.margin = 0.0;
                     }
                 });
+                if nc.pixel {
+                    let presets: [usize; 8] = [16, 24, 32, 48, 64, 96, 128, 256];
+                    ui.horizontal_wrapped(|ui| {
+                        for s in presets {
+                            if ui.selectable_label(nc.w == s && nc.h == s, format!("{s} × {s}")).clicked() { nc.w = s; nc.h = s; }
+                        }
+                    });
+                } else {
+                    let presets: [(&str, usize, usize); 11] = [("Квадрат", 2048, 2048), ("A4, 300 dpi", 2480, 3508), ("A5, 300 dpi", 1748, 2480), ("Full HD", 1920, 1080), ("4K", 3840, 2160), ("Сторис 9:16", 1080, 1920), ("Пост 4:5", 1080, 1350), ("Экран", 2560, 1600), ("Иконка", 512, 512), ("Скетч", 1500, 1500), ("Баннер", 1500, 500)];
+                    egui::Grid::new("presets").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
+                        for (i, (n, w, h)) in presets.iter().enumerate() {
+                            if ui.selectable_label(nc.w == *w && nc.h == *h, format!("{n}\n{w} × {h}")).clicked() { nc.w = *w; nc.h = *h; }
+                            if i % 3 == 2 { ui.end_row(); }
+                        }
+                    });
+                }
+                let min = if nc.pixel { 1 } else { 16 };
                 ui.horizontal(|ui| {
-                    ui.label("Ширина"); ui.add(egui::DragValue::new(&mut nc.w).range(16..=8192).suffix(" px"));
-                    ui.label("Высота"); ui.add(egui::DragValue::new(&mut nc.h).range(16..=8192).suffix(" px"));
+                    ui.label("Ширина"); ui.add(egui::DragValue::new(&mut nc.w).range(min..=8192).suffix(" px"));
+                    ui.label("Высота"); ui.add(egui::DragValue::new(&mut nc.h).range(min..=8192).suffix(" px"));
                 });
                 ui.horizontal(|ui| { ui.label("Фон"); ui.color_edit_button_srgb(&mut nc.bg); ui.checkbox(&mut nc.transparent, "Прозрачный"); });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Поле вокруг листа");
-                    for (v, n) in [(0.0, "нет"), (0.15, "15 %"), (0.3, "30 %"), (0.5, "50 %")] { ui.selectable_value(&mut nc.margin, v, n); }
-                });
-                if nc.margin > 0.0 { ui.label(egui::RichText::new("Рисовать можно и за краем листа — в экспорт попадёт только лист").weak()); }
+                if !nc.pixel {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Поле вокруг листа");
+                        for (v, n) in [(0.0, "нет"), (0.15, "15 %"), (0.3, "30 %"), (0.5, "50 %")] { ui.selectable_value(&mut nc.margin, v, n); }
+                    });
+                    if nc.margin > 0.0 { ui.label(egui::RichText::new("Рисовать можно и за краем листа — в экспорт попадёт только лист").weak()); }
+                }
                 let budget: f64 = if cfg!(target_os = "android") { 700e6 } else { 2.5e9 };
                 let full = (nc.w as f64 * (1.0 + 2.0 * nc.margin as f64)) * (nc.h as f64 * (1.0 + 2.0 * nc.margin as f64));
                 ui.label(egui::RichText::new(format!("До {} слоёв на этом устройстве", ((budget / (full * 4.0)) as usize).saturating_sub(4).clamp(3, 200))).weak());
@@ -1653,7 +1711,7 @@ impl App {
             });
             if create {
                 let nc = self.ui.new_canvas.take().unwrap();
-                if (nc.w as f32 * (1.0 + 2.0 * nc.margin)) * (nc.h as f32 * (1.0 + 2.0 * nc.margin)) > 50_000_000.0 { self.toast("Слишком большой холст"); } else { self.create_doc_margin(nc.name.trim(), nc.w, nc.h, nc.bg, !nc.transparent, nc.margin); }
+                if (nc.w as f32 * (1.0 + 2.0 * nc.margin)) * (nc.h as f32 * (1.0 + 2.0 * nc.margin)) > 50_000_000.0 { self.toast("Слишком большой холст"); } else { self.create_doc_opts(nc.name.trim(), nc.w, nc.h, nc.bg, !nc.transparent, nc.margin, nc.pixel); }
             } else if close { self.ui.new_canvas = None; }
         }
         if let Some((id, name)) = &mut self.ui.rename {
@@ -1815,6 +1873,7 @@ impl App {
         let full = (ed.doc.w, ed.doc.h);
         let sr = ed.doc.sheet_rect();
         let has_sheet = ed.doc.sheet.is_some();
+        let pixel = ed.doc.guide.pixel;
         let quick = !self.sh.prefs.export_dir.is_empty();
         let (mut save, mut save_quick, mut close) = (false, false, false);
         let mut open = true;
@@ -1839,7 +1898,16 @@ impl App {
                     });
                 }
                 let (bw, bh) = if o.sheet_only { (sr.w as f32, sr.h as f32) } else { (full.0 as f32, full.1 as f32) };
-                if raster && o.kind != "gif" {
+                if raster && pixel {
+                    // пиксель-арт: целое увеличение, каждый пиксель — чёткий квадрат
+                    ui.label(egui::RichText::new("Увеличение (пиксели остаются чёткими)").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        for k in [1.0f32, 2.0, 4.0, 8.0, 10.0, 16.0, 32.0] {
+                            if (bw.max(bh) * k) <= 16384.0 && ui.selectable_label((o.scale - k * 100.0).abs() < 0.5, format!("×{k:.0}")).clicked() { o.scale = k * 100.0; }
+                        }
+                    });
+                    ui.label(egui::RichText::new(format!("Итог: {} × {} px", (bw * o.scale / 100.0).round().max(1.0), (bh * o.scale / 100.0).round().max(1.0))).weak());
+                } else if raster && o.kind != "gif" {
                     ui.label(egui::RichText::new("Размер").strong());
                     ui.horizontal_wrapped(|ui| {
                         for p in [25.0, 50.0, 100.0, 200.0, 300.0] { if ui.selectable_label((o.scale - p).abs() < 0.5, format!("{p:.0} %")).clicked() { o.scale = p; } }
@@ -1910,6 +1978,8 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+щелчок / Shift+щелчок по слою", "Выбрать несколько слоёв"), ("Ctrl+щелчок по миниатюре", "Выделить по содержимому слоя"), ("Alt+щелчок по глазу", "Показать только этот слой"),
     ("Перетаскивание по глазкам", "Скрыть или показать сразу несколько слоёв"), ("Перетаскивание слоя", "Изменить порядок, положить в папку (пальцем и пером — за ручку ≡ или после короткого удержания)"),
     ("Кнопка пипетки / I", "Взять цвет с холста (потом вернётся прежний инструмент)"), ("Кнопка «Фото» в слоях", "Добавить фото или картинку новым слоем"),
+    ("Режим пиксель-арта", "«Изображение» (или «Действия → Холст») → «Режим пиксель-арта», или «Пиксель-арт» в новом холсте"), ("[ и ] в пиксель-арте", "Размер пиксельной кисти на 1 px"),
+    ("Пиксельная сетка", "«Вид → Пиксельная сетка»; видна при сильном увеличении"),
     ("Tab", "Скрыть панели"), ("Задержка в конце штриха", "Быстрая фигура: линия, круг, многоугольник"),
     ("2 пальца — касание", "Отменить"), ("3 пальца — касание", "Повторить"), ("2 пальца — движение", "Сдвиг, масштаб, поворот"), ("4 пальца — касание", "Скрыть панели"),
 ];

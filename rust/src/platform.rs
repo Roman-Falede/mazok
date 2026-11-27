@@ -124,6 +124,15 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::Mutex<Option<winit::platform::android::activity::AndroidApp>> = std::sync::Mutex::new(None);
+
+/// Запомнить приложение Android: из него берутся JavaVM и сама активность (MazokActivity).
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
+    if let Ok(mut g) = ANDROID_APP.lock() { *g = Some(app); }
+}
+
+#[cfg(target_os = "android")]
 pub mod android {
     use jni::objects::{JByteArray, JObject, JString, JValue};
     use jni::JNIEnv;
@@ -134,15 +143,33 @@ pub mod android {
         pub uris: Vec<String>,
     }
 
+    /// JavaVM и активность MazokActivity.
+    /// Важно: ndk_context хранит объект Application, а не активность (так делает android-activity 0.6),
+    /// поэтому методов MazokActivity (выбор файлов, чтение, буфер обмена) у него нет — отсюда была «Ошибка Java».
+    pub(crate) fn handles() -> Result<(*mut std::ffi::c_void, *mut std::ffi::c_void), String> {
+        let app = super::ANDROID_APP.lock().ok().and_then(|g| g.clone()).ok_or_else(|| "Активность Android ещё не готова".to_string())?;
+        let act = app.activity_as_ptr();
+        if act.is_null() { return Err("Активность Android недоступна".into()); }
+        Ok((app.vm_as_ptr(), act))
+    }
+
     fn with<R>(f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<R>) -> Result<R, String> {
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+        let (vm_ptr, act) = handles()?;
+        let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+        let activity = unsafe { JObject::from_raw(act.cast()) };
         let r = f(&mut env, &activity);
         if env.exception_check().unwrap_or(false) {
+            // текст исключения — чтобы было понятно, что именно не так
+            let ex = env.exception_occurred().ok();
             let _ = env.exception_clear();
-            return Err("Ошибка Java".into());
+            let text = ex.filter(|e| !e.is_null())
+                .and_then(|e| env.call_method(&e, "toString", "()Ljava/lang/String;", &[]).ok())
+                .and_then(|v| v.l().ok())
+                .and_then(|o| jstr(&mut env, o));
+            if env.exception_check().unwrap_or(false) { let _ = env.exception_clear(); }
+            log::error!("Java: {}", text.as_deref().unwrap_or("?"));
+            return Err(match text { Some(t) => format!("Ошибка Java: {t}"), None => "Ошибка Java".into() });
         }
         r.map_err(|e| e.to_string())
     }
@@ -292,10 +319,10 @@ pub fn save_bytes(name: &str, mime: &str, bytes: &[u8]) -> Result<String, String
 #[cfg(target_os = "android")]
 fn android_media_store(name: &str, mime: &str, bytes: &[u8]) -> Result<String, String> {
     use jni::objects::{JObject, JValue};
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+    let (vm_ptr, act) = android::handles()?;
+    let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+    let activity = unsafe { JObject::from_raw(act.cast()) };
     let img = mime.starts_with("image/") && !mime.contains("photoshop");
     let (dir, class) = if img { ("Pictures/Мазок", "android/provider/MediaStore$Images$Media") } else { ("Download/Мазок", "android/provider/MediaStore$Downloads") };
     let res: Result<String, jni::errors::Error> = (|| {

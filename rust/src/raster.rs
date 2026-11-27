@@ -151,6 +151,21 @@ impl Img {
         let th = ((self.h as f32 * k).round() as usize).max(1);
         self.resize(tw, th)
     }
+    /// Масштабирование «по ближайшему пикселю» — для пиксель-арта (пиксели остаются чёткими квадратами).
+    pub fn resize_nearest(&self, tw: usize, th: usize) -> Img {
+        let (tw, th) = (tw.max(1), th.max(1));
+        let mut out = Img::new(tw, th);
+        if self.w == 0 || self.h == 0 { return out; }
+        out.px.par_chunks_mut(tw * 4).enumerate().for_each(|(y, row)| {
+            let sy = ((y as f64 + 0.5) * self.h as f64 / th as f64).floor().min(self.h as f64 - 1.0) as usize;
+            for x in 0..tw {
+                let sx = ((x as f64 + 0.5) * self.w as f64 / tw as f64).floor().min(self.w as f64 - 1.0) as usize;
+                let i = self.idx(sx, sy);
+                row[x * 4..x * 4 + 4].copy_from_slice(&self.px[i..i + 4]);
+            }
+        });
+        out
+    }
     /// Масштабирование с усреднением (уменьшение) или билинейно (увеличение).
     pub fn resize(&self, tw: usize, th: usize) -> Img {
         let mut out = Img::new(tw, th);

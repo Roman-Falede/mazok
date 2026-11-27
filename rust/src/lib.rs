@@ -66,6 +66,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     if let Some(ext) = app.external_data_path() {
         platform::set_external_dir(ext);
     }
+    // Java-вызовы (выбор фото и файлов, буфер обмена, отступы экрана) идут в MazokActivity через это приложение
+    platform::set_android_app(app.clone());
     let opts = eframe::NativeOptions { viewport: viewport(), android_app: Some(app), ..Default::default() };
     let res = eframe::run_native("Мазок", opts, Box::new(move |cc| Ok(Box::new(app::App::new(cc, dir)))));
     if let Err(e) = res {

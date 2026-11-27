@@ -39,6 +39,13 @@ pub struct Prefs {
     pub auto_taper: bool,
     /// Боковая панель размера и непрозрачности справа (для левшей — слева).
     pub sidebar_right: bool,
+    /// Режим пиксель-арта: размер пиксельного карандаша и ластика, в пикселях.
+    pub pixel_brush: u32,
+    pub pixel_eraser: u32,
+    /// Круглая пиксельная кисть (иначе квадратная).
+    pub pixel_round: bool,
+    /// «Пиксель-идеальные» линии: без лишних пикселей на изгибах (для кисти в 1 пиксель).
+    pub pixel_perfect: bool,
 }
 
 impl Default for Prefs {
@@ -48,6 +55,7 @@ impl Default for Prefs {
             quick_shape: true, quick_shape_delay: 0.65, touch_draw: true, ui_mode: "studio".into(),
             light: false, cursor: true, ui_scale: 1.0, clone_aligned: true, stabilizer: 0.0, post_smooth: 0.0, vector_erase: "intersect".into(),
             export_dir: String::new(), quick_export: false, last_dir: String::new(), layer_thumb: 44.0, auto_taper: false, sidebar_right: false,
+            pixel_brush: 1, pixel_eraser: 1, pixel_round: false, pixel_perfect: true,
         }
     }
 }

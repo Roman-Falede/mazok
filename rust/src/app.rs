@@ -208,10 +208,21 @@ impl App {
 
     /// Новый холст: лист w×h и поле для рисования вокруг него (margin — доля листа с каждой стороны).
     pub fn create_doc_margin(&mut self, name: &str, w: usize, h: usize, bg: [u8; 3], bg_visible: bool, margin: f32) {
+        self.create_doc_opts(name, w, h, bg, bg_visible, margin, false);
+    }
+
+    /// Новый холст; pixel — сразу в режиме пиксель-арта (без поля, с сеткой пикселей).
+    pub fn create_doc_opts(&mut self, name: &str, w: usize, h: usize, bg: [u8; 3], bg_visible: bool, margin: f32, pixel: bool) {
+        let margin = if pixel { 0.0 } else { margin };
         let (mx, my) = ((w as f32 * margin).round() as usize, (h as f32 * margin).round() as usize);
         let mut d = Document::new(name, w + 2 * mx, h + 2 * my, bg, bg_visible);
         if mx > 0 || my > 0 {
             d.sheet = Some(util::Rect::new(mx as i32, my as i32, w as i32, h as i32));
+        }
+        if pixel {
+            d.guide.pixel = true;
+            d.guide.pixel_grid = true;
+            d.guide.grid_size = 16.0;
         }
         if let Err(e) = write_doc(&self.docs_dir, &d) {
             self.toast(format!("Ошибка: {e}"));
@@ -563,9 +574,13 @@ impl App {
         // по умолчанию — только лист: нарисованное на поле вокруг него в файл не попадает
         let d = if o.sheet_only { full.cropped_to_sheet() } else { snapshot(full) };
         let base = safe_name(&d.name);
-        let k = (o.scale / 100.0).clamp(0.05, 8.0);
+        // пиксель-арт: увеличение до ×32 «по ближайшему пикселю» — пиксели остаются чёткими квадратами
+        let pixel = full.guide.pixel;
+        let kmax = if pixel { (16384.0 / d.w.max(d.h).max(1) as f32).clamp(1.0, 32.0) } else { 8.0 };
+        let k = (o.scale / 100.0).clamp(0.05, kmax);
         let scaled = |img: Img| -> Img {
-            if (k - 1.0).abs() < 1e-3 { img } else { img.resize(((img.w as f32 * k).round() as usize).max(1), ((img.h as f32 * k).round() as usize).max(1)) }
+            let (tw, th) = (((img.w as f32 * k).round() as usize).max(1), ((img.h as f32 * k).round() as usize).max(1));
+            if (k - 1.0).abs() < 1e-3 { img } else if pixel { img.resize_nearest(tw, th) } else { img.resize(tw, th) }
         };
         let flat = || scaled(doc::flatten_export(&d, o.bg));
         let paper = if d.bg_visible && o.bg { d.bg } else { [255, 255, 255] };
@@ -588,7 +603,7 @@ impl App {
                 let frames: Vec<Img> = d.layers.iter().filter(|l| !l.group && !l.draft).map(|l| {
                     let mut f = if d.bg_visible && o.bg { Img::filled(d.w, d.h, [d.bg[0], d.bg[1], d.bg[2], 255]) } else { Img::new(d.w, d.h) };
                     if l.visible { f.draw_over(0, 0, &l.baked(), l.opacity); }
-                    f.resize(w, h)
+                    if pixel { f.resize_nearest(w, h) } else { f.resize(w, h) }
                 }).collect();
                 if frames.is_empty() { Err("Нет слоёв для кадров".into()) } else { formats::gif(&frames, 12) }
             }
@@ -681,9 +696,20 @@ impl App {
             "swap" => sh.colors.swap(),
             "default_colors" => { sh.colors.fg = [0, 0, 0]; sh.colors.bg = [255, 255, 255]; }
             "size_down" | "size_up" => {
-                let ts = ed.tool_state_mut(sh);
-                ts.size = (ts.size + if a == "size_up" { 0.03 } else { -0.03 }).clamp(0.0, 1.0);
+                let up = a == "size_up";
+                if ed.pixel_size(sh).is_some() {
+                    // пиксель-арт: размер пиксельной кисти — на 1 пиксель
+                    let v = if ed.tool == Tool::Eraser { &mut sh.prefs.pixel_eraser } else { &mut sh.prefs.pixel_brush };
+                    *v = if up { (*v + 1).min(64) } else { v.saturating_sub(1).max(1) };
+                    let n = *v;
+                    ed.toast(&format!("Пиксельная кисть: {n} px"));
+                } else {
+                    let ts = ed.tool_state_mut(sh);
+                    ts.size = (ts.size + if up { 0.03 } else { -0.03 }).clamp(0.0, 1.0);
+                }
             }
+            "pixel_mode" => { let on = !ed.pixel_mode(); ed.set_pixel_mode(on); }
+            "pixel_grid" => { ed.doc.guide.pixel_grid = !ed.doc.guide.pixel_grid; ed.mark_changed(); }
             "clear" => { if ed.xform.is_none() { ed.layer_clear(); } }
             "enter" => { if ed.xform.is_some() { ed.xform_commit(); let p = ed.prev_tool; ed.set_tool(if p == Tool::Transform { Tool::Brush } else { p }); } else if ed.filter.is_some() { ed.filter_apply(); } }
             "escape" => {
